@@ -209,6 +209,9 @@ typedef struct {
     GtkWidget *notebook;
     GtkWidget *entry_url;
     GtkWidget *lbl_zoom;
+    GtkWidget *btn_back;
+    GtkWidget *btn_forward;
+    GtkWidget *btn_reload;
     zephium_browser_context_t *core;
     WebKitUserContentFilter *adblock_filter;
     bool disable_gpu;
@@ -218,6 +221,8 @@ typedef struct {
 } zephium_gtk_app_t;
 
 static zephium_gtk_app_t g_app;
+
+static WebKitWebView *get_active_web_view(zephium_gtk_app_t *app);
 
 static void update_active_tab_ui(zephium_gtk_app_t *app) {
     gint page_idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->notebook));
@@ -245,6 +250,15 @@ static void update_active_tab_ui(zephium_gtk_app_t *app) {
     const gchar *current_title = gtk_window_get_title(GTK_WINDOW(app->window));
     if (!current_title || strcmp(current_title, title_buf) != 0) {
         gtk_window_set_title(GTK_WINDOW(app->window), title_buf);
+    }
+
+    /* Grey out the history buttons when there is nothing to go back/forward to. */
+    WebKitWebView *view = get_active_web_view(app);
+    if (app->btn_back) {
+        gtk_widget_set_sensitive(app->btn_back, view && webkit_web_view_can_go_back(view));
+    }
+    if (app->btn_forward) {
+        gtk_widget_set_sensitive(app->btn_forward, view && webkit_web_view_can_go_forward(view));
     }
 }
 
@@ -341,9 +355,13 @@ static void install_page_diagnostics(WebKitUserContentManager *ucm) {
 static WebKitWebView *get_active_web_view(zephium_gtk_app_t *app) {
     gint page_idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->notebook));
     if (page_idx < 0) return NULL;
-    GtkWidget *scrolled = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app->notebook), page_idx);
-    if (!scrolled) return NULL;
-    return WEBKIT_WEB_VIEW(gtk_bin_get_child(GTK_BIN(scrolled)));
+    GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app->notebook), page_idx);
+    if (!page) return NULL;
+    /* Pages used to be wrapped in a GtkScrolledWindow, so this returned a
+     * GtkViewport: every webkit_web_view_* call then failed its type assertion,
+     * which is why back / forward / reload / zoom / omnibox silently did nothing. */
+    if (!WEBKIT_IS_WEB_VIEW(page)) return NULL;
+    return WEBKIT_WEB_VIEW(page);
 }
 
 /* History is written once per committed document instead of on every URI change:
@@ -560,7 +578,7 @@ static gboolean on_permission_request(WebKitWebView *web_view,
     return TRUE;
 }
 
-static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url) {
+static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool reuse_initial_tab) {
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
     if (app->adblock_filter) {
         webkit_user_content_manager_add_filter(ucm, app->adblock_filter);
@@ -603,18 +621,40 @@ static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url) {
     g_signal_connect(view, "web-process-terminated", G_CALLBACK(on_web_process_terminated), NULL);
     g_signal_connect(view, "load-failed", G_CALLBACK(on_load_failed), NULL);
 
-    zephium_tab_t *tab = zephium_browser_new_tab(app->core, url);
+    /* zephium_browser_init() already created the first tab. Reusing it keeps the
+     * notebook page index and the core tab index in sync (they drifted by one
+     * before, so closing the first tab removed the wrong core tab). */
+    zephium_tab_t *tab = NULL;
+    if (reuse_initial_tab && app->core->tab_count == 1) {
+        tab = zephium_browser_get_tab(app->core, 0);
+        if (tab) {
+            app->core->active_tab_index = 0;
+            if (url && *url && zephium_browser_navigate(app->core, url)) {
+                /* the initial URL counts as a visit; make sure the load does not
+                 * record the same URL a second time */
+                size_t len = strlen(tab->current_url);
+                if (len >= sizeof(g_last_history_uri)) len = sizeof(g_last_history_uri) - 1;
+                memcpy(g_last_history_uri, tab->current_url, len);
+                g_last_history_uri[len] = '\0';
+            }
+        }
+    } else {
+        tab = zephium_browser_new_tab(app->core, url);
+    }
     if (tab && tab->current_url[0]) {
         webkit_web_view_load_uri(WEBKIT_WEB_VIEW(view), tab->current_url);
     }
 
-    GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(scrolled), view);
-    gtk_widget_show_all(scrolled);
+    /* The WebView scrolls itself; adding a GtkScrolledWindow only inserted a
+     * viewport (double scrolling + broken view lookup). */
+    gtk_widget_show(view);
 
     GtkWidget *tab_label = gtk_label_new(tab ? tab->title : "New Tab");
-    gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), scrolled, tab_label);
-    gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), -1);
+    gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), view, tab_label);
+
+    gint new_page = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app->notebook)) - 1;
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), new_page);
+    update_active_tab_ui(app);
 
     return view;
 }
@@ -688,7 +728,7 @@ static void on_zoom_out_clicked(GtkButton *btn, gpointer user_data) {
 static void on_new_tab_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     zephium_gtk_app_t *app = (zephium_gtk_app_t *)user_data;
-    create_tab_view(app, "about:blank");
+    create_tab_view(app, "about:blank", false);
 }
 
 static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
@@ -698,7 +738,7 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event, gpoint
 
     if (state == GDK_CONTROL_MASK) {
         if (event->keyval == GDK_KEY_t || event->keyval == GDK_KEY_T) {
-            create_tab_view(app, "about:blank");
+            create_tab_view(app, "about:blank", false);
             return TRUE;
         } else if (event->keyval == GDK_KEY_w || event->keyval == GDK_KEY_W) {
             gint page = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->notebook));
@@ -832,17 +872,17 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_box_pack_start(GTK_BOX(vbox), toolbar, FALSE, FALSE, 2);
 
-    GtkWidget *btn_back = gtk_button_new_with_label("<");
-    g_signal_connect(btn_back, "clicked", G_CALLBACK(on_back_clicked), &g_app);
-    gtk_box_pack_start(GTK_BOX(toolbar), btn_back, FALSE, FALSE, 1);
+    g_app.btn_back = gtk_button_new_with_label("<");
+    g_signal_connect(g_app.btn_back, "clicked", G_CALLBACK(on_back_clicked), &g_app);
+    gtk_box_pack_start(GTK_BOX(toolbar), g_app.btn_back, FALSE, FALSE, 1);
 
-    GtkWidget *btn_forward = gtk_button_new_with_label(">");
-    g_signal_connect(btn_forward, "clicked", G_CALLBACK(on_forward_clicked), &g_app);
-    gtk_box_pack_start(GTK_BOX(toolbar), btn_forward, FALSE, FALSE, 1);
+    g_app.btn_forward = gtk_button_new_with_label(">");
+    g_signal_connect(g_app.btn_forward, "clicked", G_CALLBACK(on_forward_clicked), &g_app);
+    gtk_box_pack_start(GTK_BOX(toolbar), g_app.btn_forward, FALSE, FALSE, 1);
 
-    GtkWidget *btn_reload = gtk_button_new_with_label("↻");
-    g_signal_connect(btn_reload, "clicked", G_CALLBACK(on_reload_clicked), &g_app);
-    gtk_box_pack_start(GTK_BOX(toolbar), btn_reload, FALSE, FALSE, 1);
+    g_app.btn_reload = gtk_button_new_with_label("↻");
+    g_signal_connect(g_app.btn_reload, "clicked", G_CALLBACK(on_reload_clicked), &g_app);
+    gtk_box_pack_start(GTK_BOX(toolbar), g_app.btn_reload, FALSE, FALSE, 1);
 
     GtkWidget *btn_new_tab = gtk_button_new_with_label("+ Tab");
     g_signal_connect(btn_new_tab, "clicked", G_CALLBACK(on_new_tab_clicked), &g_app);
@@ -867,7 +907,7 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     g_app.notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(vbox), g_app.notebook, TRUE, TRUE, 0);
 
-    create_tab_view(&g_app, initial_url ? initial_url : "https://duckduckgo.com");
+    create_tab_view(&g_app, initial_url ? initial_url : "https://duckduckgo.com", true);
 
     gtk_widget_show_all(g_app.window);
     update_active_tab_ui(&g_app);

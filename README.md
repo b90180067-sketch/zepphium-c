@@ -1,6 +1,82 @@
-# Zephium Browser (C17 Standalone Engine & WebKitGTK Shell)
+# Zephium Browser (C17 engine + WSL WebKitGTK shell + Windows WebView2 shell)
 
 Bản port hoàn chỉnh sang ngôn ngữ **C (chuẩn ISO C17)** của **Zephium Browser**, loại bỏ các thành phần "work" / agentic thừa, giữ lại toàn bộ tính năng duyệt web cốt lõi với độ chính xác bit-for-bit so với bản gốc Rust.
+
+---
+
+## 0. Chạy nhanh (Quick start)
+
+Có **2 shell** dùng chung core C17 — chọn theo môi trường:
+
+| | Windows (native) | WSL (WebKitGTK) |
+|---|---|---|
+| Engine | WebView2 / Edge Chromium | WebKitGTK 4.1 |
+| File chạy | `windows\zephium_win.exe` | `build/zephium` (qua `run_wsl.sh`) |
+| Đồ họa | GPU (D3D12), mượt | llvmpipe (CPU) nếu WSL không có `/dev/dri` |
+| Tab | Multi-tab + tab ngủ đông | Multi-tab |
+| Dùng khi | Dùng hằng ngày trên Windows | Test hành vi engine WebKit / môi trường Linux |
+
+### Windows (native, khuyến nghị)
+
+Yêu cầu: Windows 10/11 x64 + **Microsoft Edge WebView2 Runtime** (Windows 11 có sẵn;
+máy thiếu thì tải ở https://developer.microsoft.com/microsoft-edge/webview2/).
+Kiểm tra nhanh:
+
+```powershell
+reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv
+```
+
+```powershell
+cd C:\Users\offli\zephium-c\windows
+
+.\zephium_win.exe                                      # mở duckduckgo
+.\zephium_win.exe https://grokipedia.com               # mở URL
+.\zephium_win.exe --tab-sleep 10 https://youtube.com   # tab ngủ đông sau 10 phút
+.\zephium_win.exe --tab-sleep 0 https://example.com    # tắt ngủ đông
+```
+
+- `WebView2Loader.dll` phải nằm cạnh exe (đã có sẵn trong repo).
+- Exe chưa ký số → SmartScreen có thể hỏi: *More info → Run anyway*.
+- Phím tắt: `Ctrl+T` tab mới · `Ctrl+W` đóng tab · `Ctrl+Tab`/`Ctrl+Shift+Tab` chuyển tab ·
+  `Ctrl+L` focus ô địa chỉ · `F5` tải lại · `Ctrl++`/`Ctrl+-` zoom.
+- Log chẩn đoán: `windows\zephium_win.log` (dòng `tab N hibernated`, `tab N waking`, `navigate …`).
+- Build lại từ source:
+  ```powershell
+  cd C:\Users\offli\zephium-c\windows
+  powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
+  mingw32-make
+  ```
+
+### WSL (WebKitGTK)
+
+```bash
+cd /mnt/c/Users/offli/zephium-c
+chmod +x setup_wsl.sh run_wsl.sh
+./setup_wsl.sh                        # 1 lần: WebKitGTK, GStreamer, fonts
+./run_wsl.sh https://duckduckgo.com   # tự build bằng CMake rồi chạy
+```
+
+Các cờ hữu ích:
+
+| Cờ | Ý nghĩa |
+|---|---|
+| `--x11` / `--wayland` | ép backend hiển thị (mặc định `x11` trên WSLg) |
+| `--disable-gpu` | chỉ dùng GL phần mềm (llvmpipe) |
+| `--screenshot <file> --screenshot-delay N` | chụp ảnh trang đang render rồi thoát |
+| `--headless` | REPL/CLI khi không có màn hình |
+
+Kiểm tra sau khi chạy: `python3 read_log.py` (các mục `[RENDER]`, `[MEDIA]`, `[PAGE]`).
+Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zephium --headless` (REPL).
+
+### Nếu chạy không như mong đợi
+
+| Hiện tượng | Xử lý |
+|---|---|
+| Windows báo thiếu WebView2 / cửa sổ trắng | Cài **Edge WebView2 Runtime** rồi chạy lại; xem `windows\zephium_win.log` |
+| Windows: `WebView2Loader.dll is missing` | Copy DLL cạnh exe (hoặc `mingw32-make loader`) |
+| WSL: cửa sổ trắng / site không hiện UI | `./run_wsl.sh --screenshot /tmp/page.png --screenshot-delay 20 <url>` rồi xem `python3 read_log.py` |
+| WSL: video YouTube không phát | Không tắt compositing/DMABUF (bản này đã xử lý); xem mục *Sự cố đã biết* bên dưới |
+| WSL chậm, tụt FPS | Kiểm tra `ls /dev/dri`: không có `renderD128` thì đang render bằng CPU — xem mục **Hiệu năng** |
 
 ---
 
@@ -15,18 +91,27 @@ zephium-c/
 ├── navigation/         # URL Classification, Search fallback, SSRF & Local host protection
 ├── store/              # SQLite3 WAL store (Bookmarks, History, Downloads, Preferences)
 ├── zoom/               # Điều khiển zoom cấp số nhân rời rạc
+├── windows/            # Shell native Windows (Win32 + WebView2): multi-tab, tab ngủ đông
+│   ├── zephium_win.cpp #   host window + toolbar + tab strip (C++17, COM)
+│   ├── Makefile        #   build bằng mingw32-make
+│   ├── fetch_sdk.ps1   #   tải WebView2 SDK vào windows/sdk (không commit)
+│   ├── zephium_win.exe #   binary prebuilt
+│   └── WebView2Loader.dll
 ├── main.c              # Entry point: Linux WebKitGTK 4.1 Shell + Cross-platform CLI REPL
+├── read_log.py         # Đọc/chẩn đoán log WebKit + GStreamer + lỗi JS của trang
 ├── CMakeLists.txt      # Cấu hình build đa nền tảng (CMake 3.16+)
 ├── Makefile            # Makefile cho MinGW / GCC / Clang
 ├── setup_wsl.sh        # Script tự động cài dependencies trên WSL
 ├── run_wsl.sh          # Script tối ưu chạy trên WSLg
-├── zephium_gcc.exe     # Binary prebuilt (GCC 14+)
-└── zephium_clang.exe   # Binary prebuilt (Clang 19+)
+├── zephium_gcc.exe     # Binary CLI prebuilt (GCC 14+)
+└── zephium_clang.exe   # Binary CLI prebuilt (Clang 19+)
 ```
 
 ---
 
 ## 2. Kiểm thử trên WSL (Windows Subsystem for Linux)
+
+> Chạy nhanh: xem **§0**. Phần này đi vào chi tiết cài đặt, tùy chọn và các sự cố đã biết của shell WebKitGTK.
 
 Đường dẫn thư mục này từ trong WSL:
 ```bash
@@ -157,6 +242,8 @@ mingw32-make gate
 ---
 
 ## 5. Shell đồ họa cho Windows (Win32 + WebView2)
+
+> Chạy nhanh: xem **§0**. Phần này là chi tiết kiến trúc, build và giới hạn.
 
 WebKitGTK không tồn tại trên Windows, nên bản native dùng **WebView2** (engine Edge/Chromium
 có sẵn trong Windows) và **dùng lại core C17** (zoom, navigation, store, browser_core).

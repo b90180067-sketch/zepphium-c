@@ -213,6 +213,8 @@ typedef struct {
     WebKitUserContentFilter *adblock_filter;
     bool disable_gpu;
     bool is_wsl;
+    const char *screenshot_path;
+    int screenshot_delay;
 } zephium_gtk_app_t;
 
 static zephium_gtk_app_t g_app;
@@ -730,12 +732,80 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event, gpoint
     return FALSE;
 }
 
-static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool disable_gpu, bool is_wsl) {
+/* --screenshot: dump what the page really renders. On WSL there is no window
+ * manager tooling to grab a screenshot, and "the site shows no UI" otherwise
+ * cannot be verified from the command line. */
+static void on_screenshot_ready(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GError *err = NULL;
+    cairo_surface_t *surface = webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(src), res, &err);
+    const char *path = g_app.screenshot_path;
+    if (!surface) {
+        zephium_log("ERROR", "SCREENSHOT_FAILED", "%s", err ? err->message : "unknown error");
+        if (err) g_error_free(err);
+    } else {
+        cairo_status_t status = cairo_surface_write_to_png(surface, path);
+        if (status == CAIRO_STATUS_SUCCESS) {
+            zephium_log("INFO", "SCREENSHOT", "Saved %s (%dx%d)", path,
+                        cairo_image_surface_get_width(surface),
+                        cairo_image_surface_get_height(surface));
+        } else {
+            zephium_log("ERROR", "SCREENSHOT_FAILED", "cairo status %d writing %s",
+                        (int)status, path);
+        }
+        cairo_surface_destroy(surface);
+    }
+    gtk_main_quit();
+}
+
+static gboolean take_screenshot(gpointer data) {
+    (void)data;
+
+    /* Capture the whole toplevel: this is exactly what the user sees, including
+     * the toolbar, and it does not depend on WebKit's snapshot machinery. */
+    GdkWindow *gdk_window = gtk_widget_get_window(g_app.window);
+    if (gdk_window) {
+        gint width = gtk_widget_get_allocated_width(g_app.window);
+        gint height = gtk_widget_get_allocated_height(g_app.window);
+        GdkPixbuf *pixbuf = gdk_pixbuf_get_from_window(gdk_window, 0, 0, width, height);
+        if (pixbuf) {
+            GError *error = NULL;
+            if (gdk_pixbuf_save(pixbuf, g_app.screenshot_path, "png", &error, NULL)) {
+                zephium_log("INFO", "SCREENSHOT", "Saved %s (%dx%d)",
+                            g_app.screenshot_path, width, height);
+            } else {
+                zephium_log("ERROR", "SCREENSHOT_FAILED", "%s",
+                            error ? error->message : "png save failed");
+                if (error) g_error_free(error);
+            }
+            g_object_unref(pixbuf);
+            gtk_main_quit();
+            return G_SOURCE_REMOVE;
+        }
+    }
+
+    /* Fallback for backends that do not expose window pixels (e.g. Wayland). */
+    WebKitWebView *view = get_active_web_view(&g_app);
+    if (!view) {
+        zephium_log("ERROR", "SCREENSHOT_FAILED", "no active web view");
+        gtk_main_quit();
+        return G_SOURCE_REMOVE;
+    }
+    webkit_web_view_get_snapshot(view, WEBKIT_SNAPSHOT_REGION_VISIBLE,
+                                 WEBKIT_SNAPSHOT_OPTIONS_NONE, NULL,
+                                 on_screenshot_ready, NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool disable_gpu,
+                           bool is_wsl, const char *screenshot_path, int screenshot_delay) {
     gtk_init(&argc, &argv);
 
     memset(&g_app, 0, sizeof(g_app));
     g_app.disable_gpu = disable_gpu;
     g_app.is_wsl = is_wsl;
+    g_app.screenshot_path = screenshot_path;
+    g_app.screenshot_delay = screenshot_delay;
 
     g_app.core = zephium_browser_init("zephium_profile.db");
     if (!g_app.core) {
@@ -802,6 +872,13 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     gtk_widget_show_all(g_app.window);
     update_active_tab_ui(&g_app);
 
+    if (g_app.screenshot_path && *g_app.screenshot_path) {
+        int delay = g_app.screenshot_delay > 0 ? g_app.screenshot_delay : 8;
+        if (delay > 300) delay = 300;
+        zephium_log("INFO", "SCREENSHOT", "Capturing %s in %d s", g_app.screenshot_path, delay);
+        g_timeout_add_seconds((guint)delay, take_screenshot, NULL);
+    }
+
     gtk_main();
 
     zephium_browser_free(g_app.core);
@@ -822,6 +899,8 @@ static void print_usage(const char *prog) {
     printf("  --disable-gpu       Disable hardware GPU compositing (software rendering)\n");
     printf("  --x11               Force GDK X11 display backend\n");
     printf("  --wayland           Force GDK Wayland display backend\n");
+    printf("  --screenshot <file> Save a PNG of the rendered page and exit\n");
+    printf("  --screenshot-delay  Seconds to wait before the screenshot (default 8)\n");
 }
 
 static int run_cli_browser(const char *initial_url) {
@@ -950,6 +1029,8 @@ int main(int argc, char **argv) {
     bool disable_gpu = false;
     bool force_x11 = false;
     bool force_wayland = false;
+    const char *screenshot_path = NULL;
+    int screenshot_delay = 8;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -973,6 +1054,10 @@ int main(int argc, char **argv) {
             force_x11 = true;
         } else if (strcmp(argv[i], "--wayland") == 0) {
             force_wayland = true;
+        } else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
+            screenshot_path = argv[++i];
+        } else if (strcmp(argv[i], "--screenshot-delay") == 0 && i + 1 < argc) {
+            screenshot_delay = atoi(argv[++i]);
         } else if (argv[i][0] != '-') {
             initial_url = argv[i];
         }
@@ -987,11 +1072,14 @@ int main(int argc, char **argv) {
 
 #if defined(__linux__) && defined(ZEPHIUM_ENABLE_WEBKITGTK)
     if (!headless && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))) {
-        return run_gtk_browser(argc, argv, initial_url, disable_gpu, on_wsl);
+        return run_gtk_browser(argc, argv, initial_url, disable_gpu, on_wsl,
+                               screenshot_path, screenshot_delay);
     }
 #endif
 
     (void)headless;
     (void)on_wsl;
+    (void)screenshot_path;
+    (void)screenshot_delay;
     return run_cli_browser(initial_url);
 }

@@ -53,6 +53,11 @@ chmod +x setup_wsl.sh run_wsl.sh
   ```bash
   ./build/zephium --x11 https://gnu.org
   ```
+- **Chụp ảnh trang đang render** (dùng để kiểm tra "site không hiện UI"):
+  ```bash
+  ./run_wsl.sh --screenshot /tmp/page.png --screenshot-delay 20 https://grokipedia.com/
+  # ảnh lưu ở /tmp/page.png, đồng thời ghi log [INFO] [SCREENSHOT]
+  ```
 - **Chế độ Headless / CLI REPL (khi kết nối qua SSH hoặc terminal thuần)**:
   ```bash
   ./build/zephium --headless

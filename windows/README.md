@@ -43,16 +43,59 @@ Phím tắt: `Enter` trong ô địa chỉ để điều hướng, `Esc` trả f
 
 ## Tính năng
 
-- Toolbar: back / forward / reload, ô địa chỉ, zoom -/+, tiêu đề cửa sổ theo trang.
+- **Multi-tab**: thanh tab tự vẽ (GDI) với nút `×` từng tab và nút `+`; tab đang mở
+  có nền sáng, tab đang ngủ đông có tiền tố `⏾`. Mỗi tab sở hữu một
+  `ICoreWebView2Controller` riêng trên cùng HWND.
+- **Tab ngủ đông (hibernation)**: tab không active quá `--tab-sleep` phút sẽ bị huỷ
+  webview (giữ URL/tiêu đề/zoom), khi bấm lại sẽ được tạo lại và nạp lại URL cũ.
+  Không bao giờ ngủ tab đang active và tab đang phát audio
+  (`ICoreWebView2_8::get_IsDocumentPlayingAudio`).
+- Toolbar: back / forward / reload, ô địa chỉ, zoom -/+ (zoom theo từng tab), tiêu đề
+  cửa sổ theo trang.
 - Đồng bộ URL + trạng thái back/forward mỗi 400 ms (không cần COM event handler).
 - Lịch sử duyệt web ghi vào SQLite (`zephium_profile.db`) qua core C17 dùng chung,
-  URL được phân loại bởi module `navigation` (search fallback, SSRF guard).
+  URL được phân loại bởi module `navigation` (search fallback, SSRF guard) — kể cả
+  khi điều hướng bằng link trong trang.
 - Autoplay được bật (`--autoplay-policy=no-user-gesture-required`).
 - Log chẩn đoán: `windows/zephium_win.log`.
 
+### Tuỳ chọn dòng lệnh
+
+```
+zephium_win.exe [URL] [--tab-sleep <phút>] [--tab-sleep-seconds <giây>]
+```
+
+- `--tab-sleep <phút>`: thời gian nhàn rỗi trước khi tab ngủ đông (mặc định **10** phút,
+  `0` = tắt).
+- `--tab-sleep-seconds <giây>`: như trên nhưng theo giây (dùng để test).
+
+### Phím tắt
+
+| Phím | Hành động |
+|---|---|
+| `Ctrl+T` | Tab mới |
+| `Ctrl+W` | Đóng tab hiện tại |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Tab kế / tab trước |
+| `Ctrl+L` | Focus ô địa chỉ |
+| `F5` | Tải lại |
+| `Ctrl++` / `Ctrl+-` | Zoom tab hiện tại |
+
+### Đo hiệu quả ngủ đông (4 tab nhẹ: example.com/org/net + Wikipedia)
+
+| Cấu hình | Process | Private working set |
+|---|---|---|
+| Tắt ngủ đông | 9 | **196.3 MB** |
+| Ngủ đông sau 8s | 6 | **119.3 MB** |
+
+→ tiết kiệm ~39% RAM cho 4 tab nhẹ; với tab nặng (grokipedia, video) phần renderer
+được giải phóng ngay, còn bộ nhớ GPU của WebGL có thể được Chromium thu hồi chậm hơn.
+
+Lưu ý: tab ngủ đông khi đánh thức sẽ **nạp lại trang** (mất vị trí cuộn và trạng thái
+form); đây là đánh đổi giống "sleeping tabs" của Edge/Chrome.
+
 ## Giới hạn (MVP)
 
-- Một cửa sổ / một tab (bản GTK có nhiều tab).
+- Một cửa sổ (nhiều tab trong cửa sổ đó); chưa có session restore sau khi tắt app.
 - Chưa tích hợp adblock và download manager.
 - `zephium_win.cpp` dùng C++17 vì WebView2 là COM/C++; phần core vẫn là C17 thuần.
 

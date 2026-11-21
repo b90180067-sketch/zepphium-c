@@ -168,7 +168,11 @@ mingw32-make
 .\zephium_win.exe https://grokipedia.com
 ```
 
-Chi tiết (yêu cầu, kiến trúc, giới hạn): [windows/README.md](windows/README.md).
+Có **multi-tab** (thanh tab tự vẽ, nút `×`, nút `+`) và **tab ngủ đông**: tab nhàn rỗi
+quá `--tab-sleep` phút sẽ bị huỷ webview (giữ URL/tiêu đề), bấm lại thì nạp lại; tab đang
+active hoặc đang phát audio thì không bao giờ bị ngủ. Đo trên 4 tab nhẹ: 196 MB → 119 MB.
+
+Chi tiết (yêu cầu, kiến trúc, phím tắt, giới hạn): [windows/README.md](windows/README.md).
 
 Nhanh gọn: `zephium_win.exe` + `WebView2Loader.dll` đã build sẵn trong `windows/`,
 chỉ cần máy có Microsoft Edge WebView2 Runtime (Windows 11 mặc định có).

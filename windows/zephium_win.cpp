@@ -34,6 +34,21 @@ extern "C" {
 #define ID_ZOOM_IN 1006
 #define ID_ZOOM_LABEL 1007
 
+/* Chromium/Edge flags for the WebView2 environment. Modelled on the original
+ * Rust Zephium (Tauri/wry), which keeps its WebView2 footprint small:
+ *  - SpareRendererForSitePerProcess: no warm spare renderer per process (~40 MB)
+ *  - msWebOOUI/msPdfOOUI + Edge shell features: no Office/PDF/Sidebar/Discover
+ *    services in a browser we do not render
+ *  - disable-background-networking/component-update: no telemetry or component
+ *    downloads running behind the user's back (they also keep memory flat) */
+#define ZEPHIUM_WEBVIEW2_ARGS \
+    L"--autoplay-policy=no-user-gesture-required " \
+    L"--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess," \
+    L"msEdgeSidebarV2,msEdgeAutofill,msEdgeDiscover,msEdgeShoppingAssistant," \
+    L"msEdgeWebCapture,msEdgeCollections " \
+    L"--disable-background-networking --disable-component-update " \
+    L"--no-first-run --no-default-browser-check"
+
 /* ------------------------------------------------------------------ globals */
 static HWND g_hwnd = nullptr;
 static HWND g_url = nullptr;
@@ -522,8 +537,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     std::wstring user_data = g_exe_dir + L"\\zephium_webview2_profile";
     CreateDirectoryW(user_data.c_str(), nullptr);
 
-    ZephiumEnvOptions *options = new ZephiumEnvOptions(
-        L"--autoplay-policy=no-user-gesture-required");
+    ZephiumEnvOptions *options = new ZephiumEnvOptions(ZEPHIUM_WEBVIEW2_ARGS);
     HRESULT hr = create_env(nullptr, user_data.c_str(), options, new ZephiumEnvHandler());
     options->Release();
     if (FAILED(hr)) {

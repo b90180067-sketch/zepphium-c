@@ -56,6 +56,40 @@ Phím tắt: `Enter` trong ô địa chỉ để điều hướng, `Esc` trả f
 - Chưa tích hợp adblock và download manager.
 - `zephium_win.cpp` dùng C++17 vì WebView2 là COM/C++; phần core vẫn là C17 thuần.
 
+## Bộ nhớ (RAM)
+
+Số đo trên máy test (Windows 11 26300, WebView2 157.0.4341.60). Cột "MB" là
+**private working set** — đúng đại lượng Task Manager hiển thị ở cột Memory, cộng cho
+toàn bộ process của app:
+
+| Trang | Cửa sổ | Tổng | Ghi chú |
+|---|---|---|---|
+| example.com (tĩnh) | 1280x800 | **~94 MB** | ngang với bản Rust (~91 MB) |
+| YouTube watch (video đang phát) | 1280x800 | **~620 MB** | renderer ~295 + GPU ~260 |
+| YouTube watch (video đang phát) | 720x480 | **~460 MB** | giảm theo diện tích video |
+
+Kết luận: phần "nặng" là **giải mã video + frame buffer của GPU process**, không phải
+shell. Cùng một engine thì chi phí mỗi trang là như nhau; khác biệt lớn nhất đến từ
+kích thước video đang hiển thị và trang đó có đang phát hay không.
+
+Bản Rust (Tauri/wry) trong Task Manager hiện 2 nhóm: nhóm "WebView2: Zephium" ~91 MB là
+**cửa sổ chrome UI** (5 process, không có renderer của trang), còn nhóm có tab YouTube
+(~382 MB, renderer + GPU) mới là trang thật — nên so sánh phải cùng loại nhóm.
+
+Cờ tiết kiệm RAM đang dùng (học từ bản Rust):
+
+- `--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess,
+  msEdgeSidebarV2,msEdgeAutofill,msEdgeDiscover,msEdgeShoppingAssistant,
+  msEdgeWebCapture,msEdgeCollections`
+  → không có spare renderer dự phòng (~40 MB), không nạp service Office/PDF/Sidebar/Discover.
+- `--disable-background-networking --disable-component-update`
+  → không tải component/telemetry chạy nền.
+- `--autoplay-policy=no-user-gesture-required`: giữ để YouTube tự phát; nếu ưu tiên RAM
+  thì bỏ cờ này (đo được ~611 MB → ~546 MB cho một trang video).
+
+Muốn giảm RAM khi xem video: thu nhỏ cửa sổ (623 → 463 MB) và tránh mở nhiều tab video
+cùng lúc.
+
 ## Ghi chú kỹ thuật
 
 - `ICoreWebView2EnvironmentOptions` được tự cài đặt vì helper của SDK cần WRL

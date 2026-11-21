@@ -22,6 +22,20 @@ Makefile.cmake
 __pycache__/
 *.pyc
 
+# ---- Windows shell (Win32 + WebView2) ----
+windows/sdk/
+windows/obj/
+windows/*.o
+windows/*.exe
+windows/*.dll
+windows/*.log
+windows/*.png
+windows/WebView2*.zip
+windows/zephium_webview2_profile/
+windows/*.WebView2/
+!windows/zephium_win.exe
+!windows/WebView2Loader.dll
+
 # ---- Local scratch ----
 .tmp_*
 .git-msg.txt

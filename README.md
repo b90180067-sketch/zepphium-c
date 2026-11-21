@@ -153,3 +153,22 @@ ghi vì không phải exception.
 ```powershell
 mingw32-make gate
 ```
+
+---
+
+## 5. Shell đồ họa cho Windows (Win32 + WebView2)
+
+WebKitGTK không tồn tại trên Windows, nên bản native dùng **WebView2** (engine Edge/Chromium
+có sẵn trong Windows) và **dùng lại core C17** (zoom, navigation, store, browser_core).
+
+```powershell
+cd windows
+powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
+mingw32-make
+.\zephium_win.exe https://grokipedia.com
+```
+
+Chi tiết (yêu cầu, kiến trúc, giới hạn): [windows/README.md](windows/README.md).
+
+Nhanh gọn: `zephium_win.exe` + `WebView2Loader.dll` đã build sẵn trong `windows/`,
+chỉ cần máy có Microsoft Edge WebView2 Runtime (Windows 11 mặc định có).

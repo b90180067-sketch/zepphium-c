@@ -1,0 +1,410 @@
+{"fn":"classify","args":[""],"result":"about:blank","error":null}
+{"fn":"is_query","args":[""],"result":false,"error":null}
+{"fn":"search_query","args":[""],"result":null,"error":null}
+{"fn":"is_allowed_str","args":[""],"result":false,"error":null}
+{"fn":"web_address","args":[""],"result":null,"error":null}
+{"fn":"external_target","args":[""],"result":null,"error":null}
+{"fn":"is_subframe_document","args":[""],"result":false,"error":null}
+{"fn":"external_app_link","args":[""],"result":null,"error":null}
+{"fn":"classify","args":["   "],"result":"about:blank","error":null}
+{"fn":"is_query","args":["   "],"result":false,"error":null}
+{"fn":"search_query","args":["   "],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["   "],"result":false,"error":null}
+{"fn":"web_address","args":["   "],"result":null,"error":null}
+{"fn":"external_target","args":["   "],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["   "],"result":false,"error":null}
+{"fn":"external_app_link","args":["   "],"result":null,"error":null}
+{"fn":"classify","args":["example.com"],"result":"https://example.com/","error":null}
+{"fn":"is_query","args":["example.com"],"result":false,"error":null}
+{"fn":"search_query","args":["example.com"],"result":"https://duckduckgo.com/?q=example.com","error":null}
+{"fn":"is_allowed_str","args":["example.com"],"result":false,"error":null}
+{"fn":"web_address","args":["example.com"],"result":"https://example.com/","error":null}
+{"fn":"external_target","args":["example.com"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["example.com"],"result":false,"error":null}
+{"fn":"external_app_link","args":["example.com"],"result":null,"error":null}
+{"fn":"classify","args":["  github.com  "],"result":"https://github.com/","error":null}
+{"fn":"is_query","args":["  github.com  "],"result":false,"error":null}
+{"fn":"search_query","args":["  github.com  "],"result":"https://duckduckgo.com/?q=github.com","error":null}
+{"fn":"is_allowed_str","args":["  github.com  "],"result":false,"error":null}
+{"fn":"web_address","args":["  github.com  "],"result":"https://github.com/","error":null}
+{"fn":"external_target","args":["  github.com  "],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["  github.com  "],"result":false,"error":null}
+{"fn":"external_app_link","args":["  github.com  "],"result":null,"error":null}
+{"fn":"classify","args":["sub.example.com:8080/x"],"result":"https://sub.example.com:8080/x","error":null}
+{"fn":"is_query","args":["sub.example.com:8080/x"],"result":false,"error":null}
+{"fn":"search_query","args":["sub.example.com:8080/x"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["sub.example.com:8080/x"],"result":false,"error":null}
+{"fn":"web_address","args":["sub.example.com:8080/x"],"result":"https://sub.example.com:8080/x","error":null}
+{"fn":"external_target","args":["sub.example.com:8080/x"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["sub.example.com:8080/x"],"result":false,"error":null}
+{"fn":"external_app_link","args":["sub.example.com:8080/x"],"result":"sub.example.com:8080/x","error":null}
+{"fn":"classify","args":["https://x.com/a"],"result":"https://x.com/a","error":null}
+{"fn":"is_query","args":["https://x.com/a"],"result":false,"error":null}
+{"fn":"search_query","args":["https://x.com/a"],"result":"https://duckduckgo.com/?q=https%3A%2F%2Fx.com%2Fa","error":null}
+{"fn":"is_allowed_str","args":["https://x.com/a"],"result":true,"error":null}
+{"fn":"web_address","args":["https://x.com/a"],"result":"https://x.com/a","error":null}
+{"fn":"external_target","args":["https://x.com/a"],"result":"https://x.com/a","error":null}
+{"fn":"is_subframe_document","args":["https://x.com/a"],"result":false,"error":null}
+{"fn":"external_app_link","args":["https://x.com/a"],"result":null,"error":null}
+{"fn":"classify","args":["https://x.com/a?b=1#c"],"result":"https://x.com/a?b=1#c","error":null}
+{"fn":"is_query","args":["https://x.com/a?b=1#c"],"result":false,"error":null}
+{"fn":"search_query","args":["https://x.com/a?b=1#c"],"result":"https://duckduckgo.com/?q=https%3A%2F%2Fx.com%2Fa%3Fb%3D1%23c","error":null}
+{"fn":"is_allowed_str","args":["https://x.com/a?b=1#c"],"result":true,"error":null}
+{"fn":"web_address","args":["https://x.com/a?b=1#c"],"result":"https://x.com/a?b=1#c","error":null}
+{"fn":"external_target","args":["https://x.com/a?b=1#c"],"result":"https://x.com/a?b=1#c","error":null}
+{"fn":"is_subframe_document","args":["https://x.com/a?b=1#c"],"result":false,"error":null}
+{"fn":"external_app_link","args":["https://x.com/a?b=1#c"],"result":null,"error":null}
+{"fn":"classify","args":["http://example.com/"],"result":"http://example.com/","error":null}
+{"fn":"is_query","args":["http://example.com/"],"result":false,"error":null}
+{"fn":"search_query","args":["http://example.com/"],"result":"https://duckduckgo.com/?q=http%3A%2F%2Fexample.com%2F","error":null}
+{"fn":"is_allowed_str","args":["http://example.com/"],"result":true,"error":null}
+{"fn":"web_address","args":["http://example.com/"],"result":"http://example.com/","error":null}
+{"fn":"external_target","args":["http://example.com/"],"result":"http://example.com/","error":null}
+{"fn":"is_subframe_document","args":["http://example.com/"],"result":false,"error":null}
+{"fn":"external_app_link","args":["http://example.com/"],"result":null,"error":null}
+{"fn":"classify","args":["http://example.com:8080/"],"result":"http://example.com:8080/","error":null}
+{"fn":"is_query","args":["http://example.com:8080/"],"result":false,"error":null}
+{"fn":"search_query","args":["http://example.com:8080/"],"result":"https://duckduckgo.com/?q=http%3A%2F%2Fexample.com%3A8080%2F","error":null}
+{"fn":"is_allowed_str","args":["http://example.com:8080/"],"result":true,"error":null}
+{"fn":"web_address","args":["http://example.com:8080/"],"result":"http://example.com:8080/","error":null}
+{"fn":"external_target","args":["http://example.com:8080/"],"result":"http://example.com:8080/","error":null}
+{"fn":"is_subframe_document","args":["http://example.com:8080/"],"result":false,"error":null}
+{"fn":"external_app_link","args":["http://example.com:8080/"],"result":null,"error":null}
+{"fn":"classify","args":["hello world"],"result":"https://duckduckgo.com/?q=hello+world","error":null}
+{"fn":"is_query","args":["hello world"],"result":true,"error":null}
+{"fn":"search_query","args":["hello world"],"result":"https://duckduckgo.com/?q=hello+world","error":null}
+{"fn":"is_allowed_str","args":["hello world"],"result":false,"error":null}
+{"fn":"web_address","args":["hello world"],"result":null,"error":null}
+{"fn":"external_target","args":["hello world"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["hello world"],"result":false,"error":null}
+{"fn":"external_app_link","args":["hello world"],"result":null,"error":null}
+{"fn":"classify","args":["what is rust"],"result":"https://duckduckgo.com/?q=what+is+rust","error":null}
+{"fn":"is_query","args":["what is rust"],"result":true,"error":null}
+{"fn":"search_query","args":["what is rust"],"result":"https://duckduckgo.com/?q=what+is+rust","error":null}
+{"fn":"is_allowed_str","args":["what is rust"],"result":false,"error":null}
+{"fn":"web_address","args":["what is rust"],"result":null,"error":null}
+{"fn":"external_target","args":["what is rust"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["what is rust"],"result":false,"error":null}
+{"fn":"external_app_link","args":["what is rust"],"result":null,"error":null}
+{"fn":"classify","args":["localhost"],"result":"https://localhost/","error":null}
+{"fn":"is_query","args":["localhost"],"result":false,"error":null}
+{"fn":"search_query","args":["localhost"],"result":"https://duckduckgo.com/?q=localhost","error":null}
+{"fn":"is_allowed_str","args":["localhost"],"result":false,"error":null}
+{"fn":"web_address","args":["localhost"],"result":"https://localhost/","error":null}
+{"fn":"external_target","args":["localhost"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["localhost"],"result":false,"error":null}
+{"fn":"external_app_link","args":["localhost"],"result":null,"error":null}
+{"fn":"classify","args":["localhost:3000"],"result":"https://localhost:3000/","error":null}
+{"fn":"is_query","args":["localhost:3000"],"result":false,"error":null}
+{"fn":"search_query","args":["localhost:3000"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["localhost:3000"],"result":false,"error":null}
+{"fn":"web_address","args":["localhost:3000"],"result":"https://localhost:3000/","error":null}
+{"fn":"external_target","args":["localhost:3000"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["localhost:3000"],"result":false,"error":null}
+{"fn":"external_app_link","args":["localhost:3000"],"result":"localhost:3000","error":null}
+{"fn":"classify","args":["localhost/path"],"result":"https://localhost/path","error":null}
+{"fn":"is_query","args":["localhost/path"],"result":false,"error":null}
+{"fn":"search_query","args":["localhost/path"],"result":"https://duckduckgo.com/?q=localhost%2Fpath","error":null}
+{"fn":"is_allowed_str","args":["localhost/path"],"result":false,"error":null}
+{"fn":"web_address","args":["localhost/path"],"result":"https://localhost/path","error":null}
+{"fn":"external_target","args":["localhost/path"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["localhost/path"],"result":false,"error":null}
+{"fn":"external_app_link","args":["localhost/path"],"result":null,"error":null}
+{"fn":"classify","args":["192.168.1.1"],"result":"https://192.168.1.1/","error":null}
+{"fn":"is_query","args":["192.168.1.1"],"result":false,"error":null}
+{"fn":"search_query","args":["192.168.1.1"],"result":"https://duckduckgo.com/?q=192.168.1.1","error":null}
+{"fn":"is_allowed_str","args":["192.168.1.1"],"result":false,"error":null}
+{"fn":"web_address","args":["192.168.1.1"],"result":"https://192.168.1.1/","error":null}
+{"fn":"external_target","args":["192.168.1.1"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["192.168.1.1"],"result":false,"error":null}
+{"fn":"external_app_link","args":["192.168.1.1"],"result":null,"error":null}
+{"fn":"classify","args":["192.168.1.1:8080/admin"],"result":"https://192.168.1.1:8080/admin","error":null}
+{"fn":"is_query","args":["192.168.1.1:8080/admin"],"result":false,"error":null}
+{"fn":"search_query","args":["192.168.1.1:8080/admin"],"result":"https://duckduckgo.com/?q=192.168.1.1%3A8080%2Fadmin","error":null}
+{"fn":"is_allowed_str","args":["192.168.1.1:8080/admin"],"result":false,"error":null}
+{"fn":"web_address","args":["192.168.1.1:8080/admin"],"result":"https://192.168.1.1:8080/admin","error":null}
+{"fn":"external_target","args":["192.168.1.1:8080/admin"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["192.168.1.1:8080/admin"],"result":false,"error":null}
+{"fn":"external_app_link","args":["192.168.1.1:8080/admin"],"result":null,"error":null}
+{"fn":"classify","args":["999.1.1.1"],"result":"https://duckduckgo.com/?q=999.1.1.1","error":null}
+{"fn":"is_query","args":["999.1.1.1"],"result":true,"error":null}
+{"fn":"search_query","args":["999.1.1.1"],"result":"https://duckduckgo.com/?q=999.1.1.1","error":null}
+{"fn":"is_allowed_str","args":["999.1.1.1"],"result":false,"error":null}
+{"fn":"web_address","args":["999.1.1.1"],"result":null,"error":null}
+{"fn":"external_target","args":["999.1.1.1"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["999.1.1.1"],"result":false,"error":null}
+{"fn":"external_app_link","args":["999.1.1.1"],"result":null,"error":null}
+{"fn":"classify","args":["[::1]:7474/path"],"result":"https://[::1]:7474/path","error":null}
+{"fn":"is_query","args":["[::1]:7474/path"],"result":false,"error":null}
+{"fn":"search_query","args":["[::1]:7474/path"],"result":"https://duckduckgo.com/?q=%5B%3A%3A1%5D%3A7474%2Fpath","error":null}
+{"fn":"is_allowed_str","args":["[::1]:7474/path"],"result":false,"error":null}
+{"fn":"web_address","args":["[::1]:7474/path"],"result":"https://[::1]:7474/path","error":null}
+{"fn":"external_target","args":["[::1]:7474/path"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["[::1]:7474/path"],"result":false,"error":null}
+{"fn":"external_app_link","args":["[::1]:7474/path"],"result":null,"error":null}
+{"fn":"classify","args":["[2001:db8::1]"],"result":"https://[2001:db8::1]/","error":null}
+{"fn":"is_query","args":["[2001:db8::1]"],"result":false,"error":null}
+{"fn":"search_query","args":["[2001:db8::1]"],"result":"https://duckduckgo.com/?q=%5B2001%3Adb8%3A%3A1%5D","error":null}
+{"fn":"is_allowed_str","args":["[2001:db8::1]"],"result":false,"error":null}
+{"fn":"web_address","args":["[2001:db8::1]"],"result":"https://[2001:db8::1]/","error":null}
+{"fn":"external_target","args":["[2001:db8::1]"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["[2001:db8::1]"],"result":false,"error":null}
+{"fn":"external_app_link","args":["[2001:db8::1]"],"result":null,"error":null}
+{"fn":"classify","args":["[::1]:99999"],"result":null,"error":null}
+{"fn":"is_query","args":["[::1]:99999"],"result":false,"error":null}
+{"fn":"search_query","args":["[::1]:99999"],"result":"https://duckduckgo.com/?q=%5B%3A%3A1%5D%3A99999","error":null}
+{"fn":"is_allowed_str","args":["[::1]:99999"],"result":false,"error":null}
+{"fn":"web_address","args":["[::1]:99999"],"result":null,"error":null}
+{"fn":"external_target","args":["[::1]:99999"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["[::1]:99999"],"result":false,"error":null}
+{"fn":"external_app_link","args":["[::1]:99999"],"result":null,"error":null}
+{"fn":"classify","args":["https://user:password@[::1]/"],"result":null,"error":null}
+{"fn":"is_query","args":["https://user:password@[::1]/"],"result":false,"error":null}
+{"fn":"search_query","args":["https://user:password@[::1]/"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["https://user:password@[::1]/"],"result":false,"error":null}
+{"fn":"web_address","args":["https://user:password@[::1]/"],"result":null,"error":null}
+{"fn":"external_target","args":["https://user:password@[::1]/"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["https://user:password@[::1]/"],"result":false,"error":null}
+{"fn":"external_app_link","args":["https://user:password@[::1]/"],"result":null,"error":null}
+{"fn":"classify","args":["javascript:alert(1)"],"result":null,"error":null}
+{"fn":"is_query","args":["javascript:alert(1)"],"result":false,"error":null}
+{"fn":"search_query","args":["javascript:alert(1)"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["javascript:alert(1)"],"result":false,"error":null}
+{"fn":"web_address","args":["javascript:alert(1)"],"result":null,"error":null}
+{"fn":"external_target","args":["javascript:alert(1)"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["javascript:alert(1)"],"result":false,"error":null}
+{"fn":"external_app_link","args":["javascript:alert(1)"],"result":null,"error":null}
+{"fn":"classify","args":["file:///etc/passwd"],"result":null,"error":null}
+{"fn":"is_query","args":["file:///etc/passwd"],"result":false,"error":null}
+{"fn":"search_query","args":["file:///etc/passwd"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["file:///etc/passwd"],"result":false,"error":null}
+{"fn":"web_address","args":["file:///etc/passwd"],"result":null,"error":null}
+{"fn":"external_target","args":["file:///etc/passwd"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["file:///etc/passwd"],"result":false,"error":null}
+{"fn":"external_app_link","args":["file:///etc/passwd"],"result":null,"error":null}
+{"fn":"classify","args":["data:text/html,secret"],"result":null,"error":null}
+{"fn":"is_query","args":["data:text/html,secret"],"result":false,"error":null}
+{"fn":"search_query","args":["data:text/html,secret"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["data:text/html,secret"],"result":false,"error":null}
+{"fn":"web_address","args":["data:text/html,secret"],"result":null,"error":null}
+{"fn":"external_target","args":["data:text/html,secret"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["data:text/html,secret"],"result":true,"error":null}
+{"fn":"external_app_link","args":["data:text/html,secret"],"result":null,"error":null}
+{"fn":"classify","args":["about:blank"],"result":"about:blank","error":null}
+{"fn":"is_query","args":["about:blank"],"result":false,"error":null}
+{"fn":"search_query","args":["about:blank"],"result":"https://duckduckgo.com/?q=about%3Ablank","error":null}
+{"fn":"is_allowed_str","args":["about:blank"],"result":true,"error":null}
+{"fn":"web_address","args":["about:blank"],"result":null,"error":null}
+{"fn":"external_target","args":["about:blank"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["about:blank"],"result":true,"error":null}
+{"fn":"external_app_link","args":["about:blank"],"result":null,"error":null}
+{"fn":"classify","args":["about:config"],"result":null,"error":null}
+{"fn":"is_query","args":["about:config"],"result":false,"error":null}
+{"fn":"search_query","args":["about:config"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["about:config"],"result":false,"error":null}
+{"fn":"web_address","args":["about:config"],"result":null,"error":null}
+{"fn":"external_target","args":["about:config"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["about:config"],"result":false,"error":null}
+{"fn":"external_app_link","args":["about:config"],"result":null,"error":null}
+{"fn":"classify","args":["tauri.localhost/index.html"],"result":null,"error":null}
+{"fn":"is_query","args":["tauri.localhost/index.html"],"result":false,"error":null}
+{"fn":"search_query","args":["tauri.localhost/index.html"],"result":"https://duckduckgo.com/?q=tauri.localhost%2Findex.html","error":null}
+{"fn":"is_allowed_str","args":["tauri.localhost/index.html"],"result":false,"error":null}
+{"fn":"web_address","args":["tauri.localhost/index.html"],"result":null,"error":null}
+{"fn":"external_target","args":["tauri.localhost/index.html"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["tauri.localhost/index.html"],"result":false,"error":null}
+{"fn":"external_app_link","args":["tauri.localhost/index.html"],"result":null,"error":null}
+{"fn":"classify","args":["zephium-onboarding.localhost/onboarding.html"],"result":null,"error":null}
+{"fn":"is_query","args":["zephium-onboarding.localhost/onboarding.html"],"result":false,"error":null}
+{"fn":"search_query","args":["zephium-onboarding.localhost/onboarding.html"],"result":"https://duckduckgo.com/?q=zephium-onboarding.localhost%2Fonboarding.html","error":null}
+{"fn":"is_allowed_str","args":["zephium-onboarding.localhost/onboarding.html"],"result":false,"error":null}
+{"fn":"web_address","args":["zephium-onboarding.localhost/onboarding.html"],"result":null,"error":null}
+{"fn":"external_target","args":["zephium-onboarding.localhost/onboarding.html"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["zephium-onboarding.localhost/onboarding.html"],"result":false,"error":null}
+{"fn":"external_app_link","args":["zephium-onboarding.localhost/onboarding.html"],"result":null,"error":null}
+{"fn":"classify","args":["asset.localhost/a"],"result":null,"error":null}
+{"fn":"is_query","args":["asset.localhost/a"],"result":false,"error":null}
+{"fn":"search_query","args":["asset.localhost/a"],"result":"https://duckduckgo.com/?q=asset.localhost%2Fa","error":null}
+{"fn":"is_allowed_str","args":["asset.localhost/a"],"result":false,"error":null}
+{"fn":"web_address","args":["asset.localhost/a"],"result":null,"error":null}
+{"fn":"external_target","args":["asset.localhost/a"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["asset.localhost/a"],"result":false,"error":null}
+{"fn":"external_app_link","args":["asset.localhost/a"],"result":null,"error":null}
+{"fn":"classify","args":["ipc.localhost/b"],"result":null,"error":null}
+{"fn":"is_query","args":["ipc.localhost/b"],"result":false,"error":null}
+{"fn":"search_query","args":["ipc.localhost/b"],"result":"https://duckduckgo.com/?q=ipc.localhost%2Fb","error":null}
+{"fn":"is_allowed_str","args":["ipc.localhost/b"],"result":false,"error":null}
+{"fn":"web_address","args":["ipc.localhost/b"],"result":null,"error":null}
+{"fn":"external_target","args":["ipc.localhost/b"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["ipc.localhost/b"],"result":false,"error":null}
+{"fn":"external_app_link","args":["ipc.localhost/b"],"result":null,"error":null}
+{"fn":"classify","args":["https://user:secret@example.com/"],"result":null,"error":null}
+{"fn":"is_query","args":["https://user:secret@example.com/"],"result":false,"error":null}
+{"fn":"search_query","args":["https://user:secret@example.com/"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["https://user:secret@example.com/"],"result":false,"error":null}
+{"fn":"web_address","args":["https://user:secret@example.com/"],"result":null,"error":null}
+{"fn":"external_target","args":["https://user:secret@example.com/"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["https://user:secret@example.com/"],"result":false,"error":null}
+{"fn":"external_app_link","args":["https://user:secret@example.com/"],"result":null,"error":null}
+{"fn":"classify","args":["https://"],"result":null,"error":null}
+{"fn":"is_query","args":["https://"],"result":false,"error":null}
+{"fn":"search_query","args":["https://"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["https://"],"result":false,"error":null}
+{"fn":"web_address","args":["https://"],"result":null,"error":null}
+{"fn":"external_target","args":["https://"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["https://"],"result":false,"error":null}
+{"fn":"external_app_link","args":["https://"],"result":null,"error":null}
+{"fn":"classify","args":["/home/alice/private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["/home/alice/private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["/home/alice/private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["/home/alice/private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["/home/alice/private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["/home/alice/private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["/home/alice/private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["/home/alice/private.txt"],"result":null,"error":null}
+{"fn":"classify","args":["~/private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["~/private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["~/private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["~/private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["~/private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["~/private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["~/private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["~/private.txt"],"result":null,"error":null}
+{"fn":"classify","args":["./private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["./private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["./private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["./private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["./private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["./private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["./private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["./private.txt"],"result":null,"error":null}
+{"fn":"classify","args":["../private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["../private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["../private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["../private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["../private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["../private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["../private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["../private.txt"],"result":null,"error":null}
+{"fn":"classify","args":["C:\\Users\\alice\\private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["C:\\Users\\alice\\private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["C:\\Users\\alice\\private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["C:\\Users\\alice\\private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["C:\\Users\\alice\\private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["C:\\Users\\alice\\private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["C:\\Users\\alice\\private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["C:\\Users\\alice\\private.txt"],"result":"c:\\Users\\alice\\private.txt","error":null}
+{"fn":"classify","args":["C:/Users/alice/private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["C:/Users/alice/private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["C:/Users/alice/private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["C:/Users/alice/private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["C:/Users/alice/private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["C:/Users/alice/private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["C:/Users/alice/private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["C:/Users/alice/private.txt"],"result":"c:/Users/alice/private.txt","error":null}
+{"fn":"classify","args":["\\\\server\\share\\private.txt"],"result":null,"error":null}
+{"fn":"is_query","args":["\\\\server\\share\\private.txt"],"result":false,"error":null}
+{"fn":"search_query","args":["\\\\server\\share\\private.txt"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["\\\\server\\share\\private.txt"],"result":false,"error":null}
+{"fn":"web_address","args":["\\\\server\\share\\private.txt"],"result":null,"error":null}
+{"fn":"external_target","args":["\\\\server\\share\\private.txt"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["\\\\server\\share\\private.txt"],"result":false,"error":null}
+{"fn":"external_app_link","args":["\\\\server\\share\\private.txt"],"result":null,"error":null}
+{"fn":"classify","args":["paypal.com@evil.com"],"result":"https://duckduckgo.com/?q=paypal.com%40evil.com","error":null}
+{"fn":"is_query","args":["paypal.com@evil.com"],"result":true,"error":null}
+{"fn":"search_query","args":["paypal.com@evil.com"],"result":"https://duckduckgo.com/?q=paypal.com%40evil.com","error":null}
+{"fn":"is_allowed_str","args":["paypal.com@evil.com"],"result":false,"error":null}
+{"fn":"web_address","args":["paypal.com@evil.com"],"result":null,"error":null}
+{"fn":"external_target","args":["paypal.com@evil.com"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["paypal.com@evil.com"],"result":false,"error":null}
+{"fn":"external_app_link","args":["paypal.com@evil.com"],"result":null,"error":null}
+{"fn":"classify","args":["someone@example.com"],"result":"https://duckduckgo.com/?q=someone%40example.com","error":null}
+{"fn":"is_query","args":["someone@example.com"],"result":true,"error":null}
+{"fn":"search_query","args":["someone@example.com"],"result":"https://duckduckgo.com/?q=someone%40example.com","error":null}
+{"fn":"is_allowed_str","args":["someone@example.com"],"result":false,"error":null}
+{"fn":"web_address","args":["someone@example.com"],"result":null,"error":null}
+{"fn":"external_target","args":["someone@example.com"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["someone@example.com"],"result":false,"error":null}
+{"fn":"external_app_link","args":["someone@example.com"],"result":null,"error":null}
+{"fn":"classify","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":"https://duckduckgo.com/?q=compare+%28https%3A%2F%2Fexample.com%2Fa%3Fx%3D1%29%2C+with+https%3A%2F%2Fexample.org%2Fb%23two","error":null}
+{"fn":"is_query","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":true,"error":null}
+{"fn":"search_query","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":"https://duckduckgo.com/?q=compare+%28https%3A%2F%2Fexample.com%2Fa%3Fx%3D1%29%2C+with+https%3A%2F%2Fexample.org%2Fb%23two","error":null}
+{"fn":"is_allowed_str","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":false,"error":null}
+{"fn":"web_address","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":null,"error":null}
+{"fn":"external_target","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":false,"error":null}
+{"fn":"external_app_link","args":["compare (https://example.com/a?x=1), with https://example.org/b#two"],"result":null,"error":null}
+{"fn":"classify","args":["compare https://user:secret@example.com with docs"],"result":null,"error":null}
+{"fn":"is_query","args":["compare https://user:secret@example.com with docs"],"result":false,"error":null}
+{"fn":"search_query","args":["compare https://user:secret@example.com with docs"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["compare https://user:secret@example.com with docs"],"result":false,"error":null}
+{"fn":"web_address","args":["compare https://user:secret@example.com with docs"],"result":null,"error":null}
+{"fn":"external_target","args":["compare https://user:secret@example.com with docs"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["compare https://user:secret@example.com with docs"],"result":false,"error":null}
+{"fn":"external_app_link","args":["compare https://user:secret@example.com with docs"],"result":null,"error":null}
+{"fn":"classify","args":["find file:///private.txt online"],"result":null,"error":null}
+{"fn":"is_query","args":["find file:///private.txt online"],"result":false,"error":null}
+{"fn":"search_query","args":["find file:///private.txt online"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["find file:///private.txt online"],"result":false,"error":null}
+{"fn":"web_address","args":["find file:///private.txt online"],"result":null,"error":null}
+{"fn":"external_target","args":["find file:///private.txt online"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["find file:///private.txt online"],"result":false,"error":null}
+{"fn":"external_app_link","args":["find file:///private.txt online"],"result":null,"error":null}
+{"fn":"classify","args":["open steam://run/123 in docs"],"result":null,"error":null}
+{"fn":"is_query","args":["open steam://run/123 in docs"],"result":false,"error":null}
+{"fn":"search_query","args":["open steam://run/123 in docs"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["open steam://run/123 in docs"],"result":false,"error":null}
+{"fn":"web_address","args":["open steam://run/123 in docs"],"result":null,"error":null}
+{"fn":"external_target","args":["open steam://run/123 in docs"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["open steam://run/123 in docs"],"result":false,"error":null}
+{"fn":"external_app_link","args":["open steam://run/123 in docs"],"result":null,"error":null}
+{"fn":"classify","args":["compare https:// with docs"],"result":null,"error":null}
+{"fn":"is_query","args":["compare https:// with docs"],"result":false,"error":null}
+{"fn":"search_query","args":["compare https:// with docs"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["compare https:// with docs"],"result":false,"error":null}
+{"fn":"web_address","args":["compare https:// with docs"],"result":null,"error":null}
+{"fn":"external_target","args":["compare https:// with docs"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["compare https:// with docs"],"result":false,"error":null}
+{"fn":"external_app_link","args":["compare https:// with docs"],"result":null,"error":null}
+{"fn":"classify","args":["compare http://tauri.localhost/index.html with docs"],"result":null,"error":null}
+{"fn":"is_query","args":["compare http://tauri.localhost/index.html with docs"],"result":false,"error":null}
+{"fn":"search_query","args":["compare http://tauri.localhost/index.html with docs"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["compare http://tauri.localhost/index.html with docs"],"result":false,"error":null}
+{"fn":"web_address","args":["compare http://tauri.localhost/index.html with docs"],"result":null,"error":null}
+{"fn":"external_target","args":["compare http://tauri.localhost/index.html with docs"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["compare http://tauri.localhost/index.html with docs"],"result":false,"error":null}
+{"fn":"external_app_link","args":["compare http://tauri.localhost/index.html with docs"],"result":null,"error":null}
+{"fn":"classify","args":["compare https://example.com/path,steam://run/123 with docs"],"result":null,"error":null}
+{"fn":"is_query","args":["compare https://example.com/path,steam://run/123 with docs"],"result":false,"error":null}
+{"fn":"search_query","args":["compare https://example.com/path,steam://run/123 with docs"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["compare https://example.com/path,steam://run/123 with docs"],"result":false,"error":null}
+{"fn":"web_address","args":["compare https://example.com/path,steam://run/123 with docs"],"result":null,"error":null}
+{"fn":"external_target","args":["compare https://example.com/path,steam://run/123 with docs"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["compare https://example.com/path,steam://run/123 with docs"],"result":false,"error":null}
+{"fn":"external_app_link","args":["compare https://example.com/path,steam://run/123 with docs"],"result":null,"error":null}
+{"fn":"classify","args":["compare https://example.com/path?next=file:///private with docs"],"result":null,"error":null}
+{"fn":"is_query","args":["compare https://example.com/path?next=file:///private with docs"],"result":false,"error":null}
+{"fn":"search_query","args":["compare https://example.com/path?next=file:///private with docs"],"result":null,"error":null}
+{"fn":"is_allowed_str","args":["compare https://example.com/path?next=file:///private with docs"],"result":false,"error":null}
+{"fn":"web_address","args":["compare https://example.com/path?next=file:///private with docs"],"result":null,"error":null}
+{"fn":"external_target","args":["compare https://example.com/path?next=file:///private with docs"],"result":null,"error":null}
+{"fn":"is_subframe_document","args":["compare https://example.com/path?next=file:///private with docs"],"result":false,"error":null}
+{"fn":"external_app_link","args":["compare https://example.com/path?next=file:///private with docs"],"result":null,"error":null}
+{"fn":"app_link_scheme","args":["zoommtg"],"result":true,"error":null}
+{"fn":"app_link_scheme","args":["mailto"],"result":true,"error":null}
+{"fn":"app_link_scheme","args":["slack"],"result":true,"error":null}
+{"fn":"app_link_scheme","args":["http"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["https"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["file"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["chrome"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["about"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["zephium"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["zephium-app"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["invalid_scheme"],"result":false,"error":null}
+{"fn":"app_link_scheme","args":[""],"result":false,"error":null}
+{"fn":"app_link_scheme","args":["tel"],"result":true,"error":null}
+{"fn":"app_link_scheme","args":["msteams"],"result":true,"error":null}
+{"fn":"app_link_outcome","args":[true,true],"result":"Ask","error":null}
+{"fn":"app_link_outcome","args":[true,false],"result":"Ask","error":null}
+{"fn":"app_link_outcome","args":[false,true],"result":"Show","error":null}
+{"fn":"app_link_outcome","args":[false,false],"result":"Silent","error":null}

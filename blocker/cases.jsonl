@@ -1,0 +1,23 @@
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?ads\\.example([^A-Za-z0-9_.%-].*)?$"],"result":"^[^:]+:(//)?([^/]+\\.)?ads\\.example[^A-Za-z0-9_.%-]","error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?doubleclick\\.net([^A-Za-z0-9_.%-].*)?$"],"result":"^[^:]+:(//)?([^/]+\\.)?doubleclick\\.net[^A-Za-z0-9_.%-]","error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?track_sub\\.analytics-host\\.com([^A-Za-z0-9_.%-].*)?$"],"result":"^[^:]+:(//)?([^/]+\\.)?track_sub\\.analytics-host\\.com[^A-Za-z0-9_.%-]","error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?ads\\.example/path([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?ads.*\\.example([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?ads\\.example([^A-Za-z0-9_.%-])?$"],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":["/ad([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?localhost([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":[""],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":["not a regex"],"result":null,"error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?example\\.com([^A-Za-z0-9_.%-].*)?$"],"result":"^[^:]+:(//)?([^/]+\\.)?example\\.com[^A-Za-z0-9_.%-]","error":null}
+{"fn":"simplify_canonical_host_boundary","args":["^[^:]+:(//)?([^/]+\\.)?a\\.b\\.c\\.d([^A-Za-z0-9_.%-].*)?$"],"result":"^[^:]+:(//)?([^/]+\\.)?a\\.b\\.c\\.d[^A-Za-z0-9_.%-]","error":null}
+{"fn":"split_separator_end","args":["^[^:]+:(//)?([^/]+\\.)?ads\\.example/path([^A-Za-z0-9_.%-].*)?$"],"result":["^[^:]+:(//)?([^/]+\\.)?ads\\.example/path$","^[^:]+:(//)?([^/]+\\.)?ads\\.example/path[^A-Za-z0-9_.%-]"],"error":null}
+{"fn":"split_separator_end","args":["/banner/ad([^A-Za-z0-9_.%-].*)?$"],"result":["/banner/ad$","/banner/ad[^A-Za-z0-9_.%-]"],"error":null}
+{"fn":"split_separator_end","args":["\\?type=placement([^A-Za-z0-9_.%-].*)?$"],"result":["\\?type=placement$","\\?type=placement[^A-Za-z0-9_.%-]"],"error":null}
+{"fn":"split_separator_end","args":["/a.*/b([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"split_separator_end","args":["([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"split_separator_end","args":["/a\\([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"split_separator_end","args":["/ad([^A-Za-z0-9_.%-])?$"],"result":null,"error":null}
+{"fn":"split_separator_end","args":[""],"result":null,"error":null}
+{"fn":"split_separator_end","args":["plain-text"],"result":null,"error":null}
+{"fn":"split_separator_end","args":["/tracker\\([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
+{"fn":"split_separator_end","args":["/safe/path/([^A-Za-z0-9_.%-].*)?$"],"result":["/safe/path/$","/safe/path/[^A-Za-z0-9_.%-]"],"error":null}

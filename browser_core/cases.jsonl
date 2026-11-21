@@ -1,0 +1,16 @@
+{"id": 1, "action": "init", "expected_tab_count": 1, "expected_active": 0, "expected_url": "about:blank"}
+{"id": 2, "action": "new_tab", "url": "https://rust-lang.org", "expected_tab_count": 2, "expected_active": 1, "expected_url": "https://rust-lang.org"}
+{"id": 3, "action": "new_tab", "url": "github.com", "expected_tab_count": 3, "expected_active": 2, "expected_url": "https://github.com/"}
+{"id": 4, "action": "navigate", "input": "https://gnu.org", "expected_url": "https://gnu.org"}
+{"id": 5, "action": "navigate", "input": "c standard library", "expected_url": "https://duckduckgo.com/?q=c+standard+library"}
+{"id": 6, "action": "step_zoom", "zoom_in": true, "expected_zoom": 110}
+{"id": 7, "action": "step_zoom", "zoom_in": true, "expected_zoom": 125}
+{"id": 8, "action": "step_zoom", "zoom_in": false, "expected_zoom": 110}
+{"id": 9, "action": "switch_tab", "index": 0, "expected_active": 0, "expected_url": "about:blank"}
+{"id": 10, "action": "close_tab", "index": 1, "expected_tab_count": 2, "expected_active": 0}
+{"id": 11, "action": "set_title", "index": 0, "title": "Blank Tab", "expected_title": "Blank Tab"}
+{"id": 12, "action": "is_nav_allowed", "url": "https://example.com", "expected_allowed": true}
+{"id": 13, "action": "is_nav_allowed", "url": "javascript:alert(1)", "expected_allowed": false}
+{"id": 14, "action": "is_nav_allowed", "url": "vbscript:msgbox", "expected_allowed": false}
+{"id": 15, "action": "is_nav_allowed", "url": "data:text/html,test", "expected_allowed": false}
+{"id": 16, "action": "generate_adblock", "expected_has_rules": true}

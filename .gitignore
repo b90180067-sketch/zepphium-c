@@ -1,0 +1,28 @@
+# ---- Build outputs ----
+build/
+*.o
+*.exe
+# Prebuilt demo binaries are shipped on purpose (see README)
+!zephium_gcc.exe
+!zephium_clang.exe
+*.d
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.cmake
+
+# ---- Runtime data ----
+# Browser profile: contains personal browsing history, never commit it
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# ---- Python ----
+__pycache__/
+*.pyc
+
+# ---- Local verification artifacts ----
+yt_playback_verified.png
+_bench*
+perf_*

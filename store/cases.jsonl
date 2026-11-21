@@ -1,0 +1,9 @@
+{"fn":"open_memory","args":[],"result":true,"error":null}
+{"fn":"pref_roundtrip","args":["appearance","dark"],"result":"dark","error":null}
+{"fn":"pref_roundtrip","args":["search.engine","duckduckgo"],"result":"duckduckgo","error":null}
+{"fn":"pref_overwrite","args":["sidebar.width","250","300"],"result":"300","error":null}
+{"fn":"bookmark_cycle","args":["01ARZ3NDEKTSV4RRFFQ69G5FAV","https://example.com","Example"],"result":1,"error":null}
+{"fn":"bookmark_delete","args":["01ARZ3NDEKTSV4RRFFQ69G5FAV"],"result":0,"error":null}
+{"fn":"history_visits","args":["https://github.com","GitHub",3],"result":3,"error":null}
+{"fn":"history_clear","args":[],"result":0,"error":null}
+{"fn":"download_lifecycle","args":["01ARZ3NDEKTSV4RRFFQ69G5FAW","https://example.com/file.zip","/tmp/file.zip",1024,1],"result":true,"error":null}

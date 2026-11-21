@@ -1,0 +1,10 @@
+# Keep shell scripts and sources LF so they run inside WSL/Linux
+* text=auto
+*.sh text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.jsonl text eol=lf
+*.exe binary
+*.png binary

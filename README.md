@@ -116,6 +116,17 @@ Tối ưu đã áp dụng trong code:
 - Ghi lịch sử một lần cho mỗi lần điều hướng (trước đây mỗi lần `URI` đổi đều ghi), có dedupe.
 - Không cập nhật ô địa chỉ/tiêu đề nếu giá trị không đổi (tránh repaint toolbar và reset con trỏ).
 - Log media rút gọn URL (`/tmp/zephium_debug.log` 35KB → ~10KB) và `GST_DEBUG` mặc định chỉ còn ERROR.
+- **WebGL luôn bật**: llvmpipe cung cấp WebGL 1.0/2.0 (chậm hơn GPU nhưng chạy được). Tắt WebGL
+  làm mọi site dùng three.js/3D lỗi ngay `THREE.WebGLRenderer: Error creating WebGL context`
+  (ví dụ trình xem sách của grokipedia.com).
+
+### Chẩn đoán lỗi JavaScript của trang
+
+Lỗi JS của trang web (uncaught error, unhandled rejection, `console.error`) được một content
+script chuyển về UI process và ghi vào log dưới dạng `[WARN] [PAGE_JS_ERROR] ...`, nhờ đó
+`python3 read_log.py` in ra mục `[PAGE] JavaScript Errors`. Bridge được giới hạn 8 message/giây
+và 200 message/phiên để không ảnh hưởng hiệu năng; tài nguyên tải lỗi (ảnh/script 404) không bị
+ghi vì không phải exception.
 
 ---
 

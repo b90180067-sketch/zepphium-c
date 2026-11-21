@@ -179,7 +179,7 @@ static void apply_wsl_optimizations(bool force_wsl, bool disable_gpu, bool force
         /* 8. Record the render configuration: YouTube video needs both the
          * compositor and the DMA-BUF renderer, and the log reader reports it. */
         zephium_log("INFO", "RENDER_ENV",
-                    "compositing=%s dmabuf=%s gl=%s display=%s",
+                    "compositing=%s dmabuf=%s gl=%s webgl=enabled display=%s",
                     getenv("WEBKIT_DISABLE_COMPOSITING_MODE") ? "disabled" : "enabled",
                     getenv("WEBKIT_DISABLE_DMABUF_RENDERER") ? "disabled" : "enabled",
                     getenv("LIBGL_ALWAYS_SOFTWARE") ? "software/llvmpipe" : "driver-default",
@@ -243,6 +243,96 @@ static void update_active_tab_ui(zephium_gtk_app_t *app) {
     const gchar *current_title = gtk_window_get_title(GTK_WINDOW(app->window));
     if (!current_title || strcmp(current_title, title_buf) != 0) {
         gtk_window_set_title(GTK_WINDOW(app->window), title_buf);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Page diagnostics bridge
+ *
+ * WebKitGTK only prints page console output to stdout, so a JS/WebGL failure
+ * was invisible to read_log.py. A tiny content script forwards uncaught errors
+ * and console.error() to the UI process, which logs them (rate limited) so the
+ * diagnostic reader can report them.
+ * ------------------------------------------------------------------------- */
+#define ZEPHIUM_DIAG_MAX_PER_WINDOW 8
+#define ZEPHIUM_DIAG_WINDOW_SECONDS 1
+#define ZEPHIUM_DIAG_MAX_TOTAL 200
+
+static const char *ZEPHIUM_DIAG_SCRIPT =
+    "(function(){\n"
+    "  if (window.__zephiumDiag) return; window.__zephiumDiag = 1;\n"
+    "  function send(kind, text) {\n"
+    "    try {\n"
+    "      var s = String(text == null ? '' : text);\n"
+    "      window.webkit.messageHandlers.zephiumDiag.postMessage(kind + ': ' + s.slice(0, 400));\n"
+    "    } catch (e) {}\n"
+    "  }\n"
+    "  window.addEventListener('error', function (e) {\n"
+    "    if (!e || !e.message) return;  /* resource load error, not a JS exception */\n"
+    "    send('JS_ERROR', e.message + ' @ ' + (e.filename || '') + ':' + (e.lineno || 0));\n"
+    "  }, true);\n"
+    "  window.addEventListener('unhandledrejection', function (e) {\n"
+    "    var r = e && e.reason;\n"
+    "    send('JS_REJECTION', (r && (r.message || r.stack)) || String(r));\n"
+    "  }, true);\n"
+    "  if (window.console && console.error) {\n"
+    "    var original = console.error;\n"
+    "    console.error = function () {\n"
+    "      try { send('CONSOLE_ERROR', Array.prototype.map.call(arguments, function (a) {\n"
+    "        return (a && a.message) ? a.message : String(a); }).join(' ')); } catch (e) {}\n"
+    "      return original.apply(console, arguments);\n"
+    "    };\n"
+    "  }\n"
+    "})();\n";
+
+static guint g_diag_logged = 0;
+static guint g_diag_in_window = 0;
+static gint64 g_diag_window_start_us = 0;
+
+static void on_page_diagnostic(WebKitUserContentManager *manager,
+                               WebKitJavascriptResult *result,
+                               gpointer user_data) {
+    (void)manager;
+    (void)user_data;
+
+    if (g_diag_logged >= ZEPHIUM_DIAG_MAX_TOTAL) return;
+
+    gint64 now = g_get_monotonic_time();
+    if (g_diag_window_start_us == 0 ||
+        now - g_diag_window_start_us > (gint64)ZEPHIUM_DIAG_WINDOW_SECONDS * G_USEC_PER_SEC) {
+        g_diag_window_start_us = now;
+        g_diag_in_window = 0;
+    }
+    if (g_diag_in_window >= ZEPHIUM_DIAG_MAX_PER_WINDOW) return;
+
+    JSCValue *value = webkit_javascript_result_get_js_value(result);
+    if (!value) return;
+    char *message = jsc_value_to_string(value);
+    if (!message || !*message) {
+        g_free(message);
+        return;
+    }
+
+    g_diag_in_window++;
+    g_diag_logged++;
+    zephium_log("WARN", "PAGE_JS_ERROR", "%s", message);
+    g_free(message);
+}
+
+static void install_page_diagnostics(WebKitUserContentManager *ucm) {
+    if (!ucm) return;
+    if (!webkit_user_content_manager_register_script_message_handler(ucm, "zephiumDiag")) return;
+    g_signal_connect(ucm, "script-message-received::zephiumDiag",
+                     G_CALLBACK(on_page_diagnostic), NULL);
+
+    WebKitUserScript *script = webkit_user_script_new(
+        ZEPHIUM_DIAG_SCRIPT,
+        WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+        NULL, NULL);
+    if (script) {
+        webkit_user_content_manager_add_script(ucm, script);
+        webkit_user_script_unref(script);
     }
 }
 
@@ -473,17 +563,18 @@ static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url) {
     if (app->adblock_filter) {
         webkit_user_content_manager_add_filter(ucm, app->adblock_filter);
     }
+    install_page_diagnostics(ucm);
 
     GtkWidget *view = webkit_web_view_new_with_user_content_manager(ucm);
     WebKitSettings *settings = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(view));
 
     /* Accelerated compositing must stay available: WebKitGTK paints decoded video
      * frames into the compositor. Setting WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER
-     * is what used to segfault the UI process on YouTube, so only the GL-heavy
-     * WebGL path is disabled here while Mesa runs on llvmpipe. */
-    if (app->disable_gpu || app->is_wsl) {
-        webkit_settings_set_enable_webgl(settings, FALSE);
-    }
+     * is what used to segfault the UI process on YouTube.
+     *
+     * WebGL is deliberately left enabled: llvmpipe provides WebGL 1.0/2.0, and
+     * disabling it makes every three.js / 3D site fail with
+     * "Error creating WebGL context" (e.g. the grokipedia.com book viewer). */
     webkit_settings_set_enable_developer_extras(settings, TRUE);
     webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
     webkit_settings_set_enable_smooth_scrolling(settings, TRUE);

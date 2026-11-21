@@ -22,6 +22,10 @@ Makefile.cmake
 __pycache__/
 *.pyc
 
+# ---- Local scratch ----
+.tmp_*
+.git-msg.txt
+
 # ---- Local verification artifacts ----
 yt_playback_verified.png
 _bench*

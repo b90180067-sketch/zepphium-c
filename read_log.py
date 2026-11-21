@@ -106,6 +106,7 @@ def analyze_logs(follow=False):
     media_fetches = []
     warnings = []
     render_env = []
+    page_errors = []
 
     if log_path:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -125,6 +126,8 @@ def analyze_logs(follow=False):
                     media_fetches.append(line)
                 elif "RENDER_ENV" in line:
                     render_env.append(line)
+                elif "PAGE_JS_ERROR" in line:
+                    page_errors.append(line)
                 elif "[WARN]" in line:
                     warnings.append(line)
 
@@ -200,14 +203,21 @@ def analyze_logs(follow=False):
             print(f"  {GREEN}+ {short_uri(m)}{RESET}")
         print()
 
-    # 5. Render/compositor configuration
+    # 5. Page JavaScript errors reported by the content-script bridge
+    if page_errors:
+        print(f"{YELLOW}{BOLD}[PAGE] JavaScript Errors From The Loaded Site ({len(page_errors)}):{RESET}")
+        for e in page_errors[-6:]:
+            print(f"  {YELLOW}! {truncate(e, 190)}{RESET}")
+        print()
+
+    # 6. Render/compositor configuration
     if render_env:
         print(f"{CYAN}{BOLD}[RENDER] Display & Compositing:{RESET}")
         for entry in render_env[-2:]:
             print(f"  {entry}")
         print()
 
-    # 6. Media pipeline summary (the part that explains black / frozen video)
+    # 7. Media pipeline summary (the part that explains black / frozen video)
     if player_created or codecs or qos_drops or hw_decoders:
         print(f"{CYAN}{BOLD}[MEDIA] GStreamer Playback Pipeline:{RESET}")
         print(f"  players created : {player_created}")
@@ -241,6 +251,15 @@ def analyze_logs(follow=False):
 
     compositing_disabled = any("compositing=disabled" in line for line in render_env)
     dmabuf_disabled = any("dmabuf=disabled" in line for line in render_env)
+
+    webgl_errors = [e for e in page_errors if "webgl" in e.lower()]
+    if webgl_errors:
+        diagnosed = True
+        print(f"{YELLOW}> Cause: the site could not create a WebGL context.{RESET}")
+        print("  Sites using three.js/WebGL fail hard when the browser reports WebGL disabled.")
+        print("  Zephium enables WebGL and llvmpipe provides WebGL 1.0/2.0 in software, so check:")
+        print("    - the [RENDER] section above should report 'webgl=enabled'")
+        print("    - builds before 1.0.6 disabled WebGL on WSL; rebuild: cmake --build build\n")
 
     if compositing_disabled or dmabuf_disabled:
         diagnosed = True

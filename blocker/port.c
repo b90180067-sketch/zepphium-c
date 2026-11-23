@@ -1,5 +1,7 @@
 #include "port.h"
 
+#include "../browser_core/safe_string.h"
+
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -47,12 +49,15 @@ bool zephium_blocker_simplify_canonical_host_boundary(const char *pattern, char 
     if (labels < 2) return false;
 
     const char *replacement_suffix = "[^A-Za-z0-9_.%-]";
-    size_t needed = prefix_len + host_len + strlen(replacement_suffix) + 1;
+    size_t replacement_len = strlen(replacement_suffix);
+    size_t needed = prefix_len + host_len + replacement_len + 1;
     if (out_cap < needed) return false;
 
     memcpy(out_buf, PREFIX, prefix_len);
     memcpy(out_buf + prefix_len, host_start, host_len);
-    strcpy(out_buf + prefix_len + host_len, replacement_suffix);
+    (void)zephium_strcpy_safe(out_buf + prefix_len + host_len,
+                              out_cap - prefix_len - host_len,
+                              replacement_suffix);
 
     return true;
 }

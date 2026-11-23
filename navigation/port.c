@@ -7,6 +7,8 @@
 
 #include "port.h"
 
+#include "../browser_core/safe_string.h"
+
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -168,7 +170,7 @@ static bool parse_url_components(const char *url_str, size_t len, parsed_url_t *
         out->path[path_len] = '\0';
         curr = q_or_f;
     } else {
-        strcpy(out->path, "/");
+        (void)zephium_strcpy_safe(out->path, sizeof(out->path), "/");
     }
 
     if (curr < end && *curr == '?') {
@@ -300,7 +302,7 @@ static bool url_escape_append(char *dest, size_t dest_cap, size_t *pos, const ch
 static bool build_search_url(const char *val, size_t val_len, char *out, size_t out_len) {
     size_t base_len = strlen(ZEPHIUM_SEARCH_BASE) + 3;
     if (out_len < base_len + 1) return false;
-    strcpy(out, ZEPHIUM_SEARCH_BASE "?q=");
+    if (zephium_strcpy_safe(out, out_len, ZEPHIUM_SEARCH_BASE "?q=") != 0) return false;
     size_t pos = strlen(out);
 
     if (!url_escape_append(out, out_len, &pos, val, val_len)) return false;
@@ -379,8 +381,7 @@ bool zephium_nav_classify(const char *input, size_t input_len, char *out_url, si
 
     if (slen == 0) {
         if (out_len < 12) return false;
-        strcpy(out_url, "about:blank");
-        return true;
+        return zephium_strcpy_safe(out_url, out_len, "about:blank") == 0;
     }
 
     if (looks_like_local_path(s, slen)) return false;

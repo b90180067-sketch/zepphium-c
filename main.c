@@ -53,7 +53,7 @@ static void zephium_log(const char *level, const char *category, const char *fmt
     if (tm_info) {
         strftime(time_buf, sizeof(time_buf), "%H:%M:%S", tm_info);
     } else {
-        strcpy(time_buf, "unknown");
+        (void)zephium_strcpy_safe(time_buf, sizeof(time_buf), "unknown");
     }
 
     char msg[2048];
@@ -384,8 +384,7 @@ static void on_url_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointer 
 
     zephium_tab_t *tab = zephium_browser_get_active_tab(g_app.core);
     if (tab && strcmp(tab->current_url, uri) != 0) {
-        strncpy(tab->current_url, uri, sizeof(tab->current_url) - 1);
-        tab->current_url[sizeof(tab->current_url) - 1] = '\0';
+        (void)zephium_strcpy_safe(tab->current_url, sizeof(tab->current_url), uri);
         update_active_tab_ui(&g_app);
     }
 }
@@ -632,10 +631,7 @@ static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool 
             if (url && *url && zephium_browser_navigate(app->core, url)) {
                 /* the initial URL counts as a visit; make sure the load does not
                  * record the same URL a second time */
-                size_t len = strlen(tab->current_url);
-                if (len >= sizeof(g_last_history_uri)) len = sizeof(g_last_history_uri) - 1;
-                memcpy(g_last_history_uri, tab->current_url, len);
-                g_last_history_uri[len] = '\0';
+                (void)zephium_strcpy_safe(g_last_history_uri, sizeof(g_last_history_uri), tab->current_url);
             }
         }
     } else {

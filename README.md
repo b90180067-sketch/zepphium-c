@@ -27,7 +27,7 @@ reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A
 ```
 
 ```powershell
-cd C:\Users\offli\zephium-c\windows
+cd C:\Users\zephium-c\windows
 
 .\zephium_win.exe                                      # mở duckduckgo
 .\zephium_win.exe https://grokipedia.com               # mở URL
@@ -42,7 +42,7 @@ cd C:\Users\offli\zephium-c\windows
 - Log chẩn đoán: `windows\zephium_win.log` (dòng `tab N hibernated`, `tab N waking`, `navigate …`).
 - Build lại từ source:
   ```powershell
-  cd C:\Users\offli\zephium-c\windows
+  cd C:\Users\zephium-c\windows
   powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
   mingw32-make
   ```
@@ -50,7 +50,7 @@ cd C:\Users\offli\zephium-c\windows
 ### WSL (WebKitGTK)
 
 ```bash
-cd /mnt/c/Users/offli/zephium-c
+cd /mnt/c/Users/zephium-c
 chmod +x setup_wsl.sh run_wsl.sh
 ./setup_wsl.sh                        # 1 lần: WebKitGTK, GStreamer, fonts
 ./run_wsl.sh https://duckduckgo.com   # tự build bằng CMake rồi chạy
@@ -115,7 +115,7 @@ zephium-c/
 
 Đường dẫn thư mục này từ trong WSL:
 ```bash
-cd /mnt/c/Users/offli/zephium-c
+cd /mnt/c/Users/zephium-c
 ```
 
 ### Bước 1: Cài đặt dependencies (chạy 1 lần duy nhất)

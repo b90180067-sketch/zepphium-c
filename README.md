@@ -27,7 +27,7 @@ reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A
 ```
 
 ```powershell
-cd C:\Users\offli\zephium-c\windows
+cd C:\path\to\zephium-c\windows
 
 .\zephium_win.exe                                      # mở tab mới (ASCII start page)
 .\zephium_win.exe https://grokipedia.com               # mở URL
@@ -42,7 +42,7 @@ cd C:\Users\offli\zephium-c\windows
 - Log chẩn đoán: `windows\zephium_win.log` (dòng `tab N hibernated`, `tab N waking`, `navigate …`).
 - Build lại từ source:
   ```powershell
-  cd C:\Users\offli\zephium-c\windows
+  cd C:\path\to\zephium-c\windows
   powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
   mingw32-make                                             # build exe + copy newtab/
   ```
@@ -86,7 +86,7 @@ hình nền ASCII động, omnibox ở giữa màn hình, 6 shortcut, đồng h�
 ### WSL (WebKitGTK)
 
 ```bash
-cd /mnt/c/Users/offli/zephium-c
+cd /mnt/c/path/to/zephium-c
 chmod +x setup_wsl.sh run_wsl.sh
 ./setup_wsl.sh                        # 1 lần: WebKitGTK, GStreamer, fonts
 ./run_wsl.sh https://duckduckgo.com   # tự build bằng CMake rồi chạy
@@ -170,7 +170,7 @@ zephium-c/
 
 Đường dẫn thư mục này từ trong WSL:
 ```bash
-cd /mnt/c/Users/offli/zephium-c
+cd /mnt/c/path/to/zephium-c
 ```
 
 ### Bước 1: Cài đặt dependencies (chạy 1 lần duy nhất)
@@ -278,6 +278,22 @@ script chuyển về UI process và ghi vào log dưới dạng `[WARN] [PAGE_JS
 và 200 message/phiên để không ảnh hưởng hiệu năng; tài nguyên tải lỗi (ảnh/script 404) không bị
 ghi vì không phải exception.
 
+### Dữ liệu nhạy cảm: log, history, quyền file
+
+- `zephium_debug.log` được mở với `umask 077` (**mode 0600**); `/tmp/zephium-cache` và
+  `/tmp/zephium-data` (cookie, localStorage, HTTP cache) tạo với **mode 0700** — kể cả khi
+  thư mục đã tồn tại từ bản cũ.
+- Mọi URL ghi vào log (`RESOURCE_FAILED`, `RESOURCE_CANCELLED`, `REQUEST_START`,
+  `MEDIA_CHUNK_LOADED`, `PAGE_LOAD_FAILED`, thông báo chặn điều hướng) đều đi qua
+  `zephium_nav_redact_url()`: **query string và fragment bị cắt** trước khi ghi, nên token
+  phiên, tham số CDN đã ký và từ khoá tìm kiếm không nằm trong file log.
+- Bảng `history` của `zephium_profile.db` lưu URL **đã cắt query/fragment**; tab vẫn giữ
+  URL đầy đủ để reload. Hệ quả: mở lại một mục history sẽ không kèm tham số ban đầu.
+- `PAGE_JS_ERROR` chỉ ghi **200 ký tự đầu** của thông báo lỗi (phần còn lại thường chứa
+  URL đầy đủ hoặc giá trị form).
+- `zephium_profile.db` cùng `-wal`/`-shm` tạo với **mode 0600** trên Linux. Trên Windows,
+  shell đặt DACL cho `zephium_win.log` và profile: chỉ SYSTEM và user hiện tại.
+
 ---
 
 ## 4. Kiểm thử trên Windows (MinGW-w64)
@@ -298,6 +314,26 @@ ghi vì không phải exception.
 ```powershell
 mingw32-make gate
 ```
+
+Các gate dùng CMake cho phần chính, còn từng unit (`zoom`, `geometry`, `ids`,
+`navigation`, `blocker`, `store`, `browser_core`) có Makefile riêng. Không có đường dẫn
+toolchain nào bị hard-code: mặc định là `gcc`/`clang` trên `PATH` và SQLite3 qua
+`pkg-config`. Nếu toolchain/SQLite3 nằm ở prefix riêng, tạo `Makefile.local` ở thư mục gốc
+repo (đã nằm trong `.gitignore`, không bao giờ commit):
+
+```make
+CC_GCC = C:/deps/mingw64/bin/gcc.exe
+CC_CLANG = C:/deps/mingw64/bin/clang.exe
+GCC = C:/deps/mingw64/bin/gcc.exe
+GXX = C:/deps/mingw64/bin/g++.exe
+SQLITE_CFLAGS = -IC:/deps/sqlite/include
+SQLITE_LIBS = C:/deps/sqlite/lib/libsqlite3.a
+```
+
+Hoặc truyền trực tiếp: `mingw32-make CC_GCC=gcc SQLITE_LIBS=-lsqlite3 gate`.
+
+Binary được build với `-ffile-prefix-map`, nên không nhúng đường dẫn tuyệt đối của máy
+build (kiểm tra: `strings build/zephium | grep -i <tên-user>` phải không ra kết quả).
 
 ---
 

@@ -460,3 +460,16 @@
 {"fn":"is_allowed_str","args":["https://[2606:4700:4700::1111]/"],"result":true,"error":null}
 {"fn":"is_allowed_str","args":["https://example.com./"],"result":true,"error":null}
 {"fn":"is_allowed_str","args":["about:blank"],"result":true,"error":null}
+{"fn":"redact_url","args":["https://example.com/search?q=secret+token&user=alice#results"],"result":"https://example.com/search","error":null}
+{"fn":"redact_url","args":["https://example.com/path?token=abc"],"result":"https://example.com/path","error":null}
+{"fn":"redact_url","args":["https://example.com/path#section"],"result":"https://example.com/path","error":null}
+{"fn":"redact_url","args":["https://example.com/path"],"result":"https://example.com/path","error":null}
+{"fn":"redact_url","args":["https://example.com/?q=1"],"result":"https://example.com/","error":null}
+{"fn":"redact_url","args":["https://example.com#fragment"],"result":"https://example.com","error":null}
+{"fn":"redact_url","args":["https://example.com/a?x=1#y?z=2"],"result":"https://example.com/a","error":null}
+{"fn":"redact_url","args":["https://example.com/a?x=1&y=2"],"result":"https://example.com/a","error":null}
+{"fn":"redact_url","args":["http://example.com:8080/p?email=a%40b.c"],"result":"http://example.com:8080/p","error":null}
+{"fn":"redact_url","args":["about:blank"],"result":"about:blank","error":null}
+{"fn":"redact_url","args":["https://example.com"],"result":"https://example.com","error":null}
+{"fn":"redact_url","args":["?q=1"],"result":"","error":null}
+{"fn":"redact_url","args":["#frag"],"result":"","error":null}

@@ -25,19 +25,36 @@
 #endif
 
 static FILE *g_log_file = NULL;
+static const char *g_log_path = NULL;
 
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((unused))
 #endif
 static void zephium_log_init(void) {
     if (g_log_file) return;
+
+#if defined(__linux__)
+    /* The log records which pages and media were loaded, so it belongs to this
+     * user only. umask 077 covers the creation, and the chmod() below also
+     * tightens a log left at 0644 by an older build. */
+    mode_t saved_umask = umask(0077);
+#endif
+
     /* Truncate on start: read_log.py must analyse one session only. Appending
      * kept stale entries from previous runs, so old failures were reported as
      * if they were happening right now. */
     g_log_file = fopen("/tmp/zephium_debug.log", "w");
-    if (!g_log_file) {
+    if (g_log_file) {
+        g_log_path = "/tmp/zephium_debug.log";
+    } else {
         g_log_file = fopen("zephium_debug.log", "w");
+        if (g_log_file) g_log_path = "zephium_debug.log";
     }
+
+#if defined(__linux__)
+    umask(saved_umask);
+    if (g_log_path) (void)chmod(g_log_path, 0600);
+#endif
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -173,11 +190,16 @@ static void apply_wsl_optimizations(bool force_wsl, bool disable_gpu, bool force
         setenv("LIBVA_DRIVER_NAME", "none", 0);
         setenv("WEBKIT_GST_HOLE_PUNCH", "0", 0);
 
-        /* 5. Redirect cache and data directories to Linux native /tmp (tmpfs) to avoid NTFS DrvFs fallocate crashes */
+        /* 5. Redirect cache and data directories to Linux native /tmp (tmpfs) to avoid NTFS DrvFs fallocate crashes.
+         * 0700: XDG_DATA_HOME holds cookies, localStorage and the HTTP cache, i.e.
+         * the user's logged-in sessions. mkdir() does not change an existing
+         * directory, hence the chmod() for trees created by an older build. */
         setenv("XDG_CACHE_HOME", "/tmp/zephium-cache", 0);
         setenv("XDG_DATA_HOME", "/tmp/zephium-data", 0);
-        mkdir("/tmp/zephium-cache", 0755);
-        mkdir("/tmp/zephium-data", 0755);
+        mkdir("/tmp/zephium-cache", 0700);
+        mkdir("/tmp/zephium-data", 0700);
+        (void)chmod("/tmp/zephium-cache", 0700);
+        (void)chmod("/tmp/zephium-data", 0700);
 
         /* 6. Display server selection for WSLg */
         if (force_x11) {
@@ -351,7 +373,9 @@ static void on_page_diagnostic(WebKitUserContentManager *manager,
 
     g_diag_in_window++;
     g_diag_logged++;
-    zephium_log("WARN", "PAGE_JS_ERROR", "%s", message);
+    /* Page errors routinely embed the full page URL (with its query string) or
+     * form values, so only the first 200 characters reach the log. */
+    zephium_log("WARN", "PAGE_JS_ERROR", "%.200s", message);
     g_free(message);
 }
 
@@ -428,55 +452,35 @@ static void on_title_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointe
     update_active_tab_ui(&g_app);
 }
 
+/* Every URL that reaches a log line or the history table is passed through
+ * zephium_nav_redact_url(): query strings and fragments carry session tokens,
+ * signed CDN parameters and search terms, and this log is written with an fflush
+ * from the UI process while pages load. A full googlevideo URL is ~1KB, so
+ * dropping the query also keeps the lines short. */
+static const char *redacted_url(const char *url, char *buf, size_t buf_len) {
+    if (!url) return "(null)";
+    if (!zephium_nav_redact_url(url, strlen(url), buf, buf_len)) return "(unprintable)";
+    return buf;
+}
+
 static void on_resource_failed(WebKitWebResource *resource,
                               GError *error,
                               gpointer user_data) {
     (void)user_data;
     const gchar *uri = webkit_web_resource_get_uri(resource);
+    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
     /* Code 302 in WebKitNetworkError is WEBKIT_NETWORK_ERROR_CANCELLED (user navigated or redirected).
      * Do not log normal subresource cancellation as an alarming ERROR. */
     if (error && error->code == 302 && error->domain == WEBKIT_NETWORK_ERROR) {
-        zephium_log("DEBUG", "RESOURCE_CANCELLED", "URI: %s (load cancelled / redirected)", uri ? uri : "(null)");
+        zephium_log("DEBUG", "RESOURCE_CANCELLED", "URI: %s (load cancelled / redirected)",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
         return;
     }
     zephium_log("ERROR", "RESOURCE_FAILED", "URI: %s | Error: %s (code: %d, domain: %s)",
-                uri ? uri : "(null)",
+                redacted_url(uri, safe_uri, sizeof(safe_uri)),
                 error ? error->message : "unknown",
                 error ? error->code : 0,
                 error ? g_quark_to_string(error->domain) : "unknown");
-}
-
-/* A full googlevideo URL is ~1KB and these lines are written - with an fflush -
- * from the UI process while the page is loading, so log the compact form only. */
-static void zephium_format_url(const char *uri, char *out, size_t out_size) {
-    size_t olen = 0;
-    out[0] = '\0';
-    if (!uri) {
-        snprintf(out, out_size, "(null)");
-        return;
-    }
-    const char *scheme_end = strstr(uri, "://");
-    if (!scheme_end) {
-        snprintf(out, out_size, "%s", uri);
-        return;
-    }
-    const char *host_end = scheme_end + 3;
-    while (*host_end && *host_end != '/' && *host_end != '?' && *host_end != '#') host_end++;
-    const char *path_end = host_end;
-    while (*path_end && *path_end != '?' && *path_end != '#') path_end++;
-    const char *param_end = path_end;
-    if (*param_end == '?') {
-        param_end++;
-        while (*param_end && *param_end != '&' && *param_end != '#') param_end++;
-    }
-
-    olen = (size_t)(param_end - uri);
-    if (olen > out_size - 4) olen = out_size - 4;
-    memcpy(out, uri, olen);
-    out[olen] = '\0';
-    if (param_end < uri + strlen(uri)) {
-        strncat(out, "...", out_size - strlen(out) - 1);
-    }
 }
 
 static void on_resource_finished(WebKitWebResource *resource,
@@ -484,9 +488,9 @@ static void on_resource_finished(WebKitWebResource *resource,
     (void)user_data;
     const gchar *uri = webkit_web_resource_get_uri(resource);
     if (uri && (strstr(uri, "videoplayback") || strstr(uri, "manifest") || strstr(uri, "m3u8"))) {
-        char compact[256];
-        zephium_format_url(uri, compact, sizeof(compact));
-        zephium_log("INFO", "MEDIA_CHUNK_LOADED", "Media resource loaded: %s", compact);
+        char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+        zephium_log("INFO", "MEDIA_CHUNK_LOADED", "Media resource loaded: %s",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
     }
 }
 
@@ -501,9 +505,9 @@ static void on_resource_load_started(WebKitWebView *web_view,
     g_signal_connect(resource, "finished", G_CALLBACK(on_resource_finished), NULL);
 
     if (uri && (strstr(uri, "videoplayback") || strstr(uri, "blob:") || strstr(uri, "pagead") || strstr(uri, "doubleclick"))) {
-        char compact[256];
-        zephium_format_url(uri, compact, sizeof(compact));
-        zephium_log("INFO", "REQUEST_START", "Request: %s", compact);
+        char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+        zephium_log("INFO", "REQUEST_START", "Request: %s",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
     }
 }
 
@@ -546,8 +550,9 @@ static gboolean on_load_failed(WebKitWebView *web_view,
     (void)web_view;
     (void)load_event;
     (void)user_data;
+    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
     zephium_log("ERROR", "PAGE_LOAD_FAILED", "Failed loading '%s': %s (code: %d)",
-                failing_uri ? failing_uri : "(null)",
+                redacted_url(failing_uri, safe_uri, sizeof(safe_uri)),
                 error ? error->message : "unknown error",
                 error ? error->code : 0);
     return FALSE;
@@ -577,7 +582,9 @@ static gboolean on_decide_policy(WebKitWebView *web_view,
                     return FALSE;
                 }
                 if (!zephium_browser_is_nav_allowed(g_app.core, uri)) {
-                    g_printerr("[Zephium Security] Blocked link navigation to disallowed target: %s\n", uri);
+                    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+                    g_printerr("[Zephium Security] Blocked link navigation to disallowed target: %s\n",
+                               redacted_url(uri, safe_uri, sizeof(safe_uri)));
                     webkit_policy_decision_ignore(decision);
                     return TRUE;
                 }

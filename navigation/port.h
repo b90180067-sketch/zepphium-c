@@ -44,6 +44,15 @@ bool zephium_nav_search_query(const char *input, size_t input_len, char *out_url
 bool zephium_nav_is_allowed(const char *url_str, size_t len);
 
 /**
+ * Copies url into out_url with the query string and fragment removed, so
+ * "https://site/a?token=x#f" becomes "https://site/a". Logs, diagnostics and the
+ * history table must go through this: query strings and fragments regularly carry
+ * session tokens, e-mail addresses and search terms. Returns false on invalid input
+ * or when out_url cannot hold the result.
+ */
+bool zephium_nav_redact_url(const char *url, size_t url_len, char *out_url, size_t out_len);
+
+/**
  * Typed text read strictly as a web address (e.g. for bookmarking).
  */
 bool zephium_nav_web_address(const char *input, size_t input_len, char *out_url, size_t out_len);

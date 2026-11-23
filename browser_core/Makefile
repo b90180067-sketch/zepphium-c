@@ -1,13 +1,35 @@
 SHELL = cmd.exe
 
-CC_GCC = C:/mingw64/bin/gcc.exe
-CC_CLANG = C:/msys64/clang64/bin/clang.exe
+# Optional machine-local overrides (toolchain paths, SQLite3 prefix). Never
+# committed - see "Gates" in README.md. Included first so it wins over the
+# defaults below.
+-include ../Makefile.local
 
-INCLUDES = -IC:/mingw64/opt/include -I..
-SQLITE_LIB = C:/mingw64/opt/lib/libsqlite3.a -lbcrypt
+# Toolchain: the defaults are the names MinGW-w64/MSYS2 put on PATH. Override with
+# e.g. mingw32-make CC_GCC=gcc CC_CLANG=clang gate
+CC_GCC ?= gcc
+CC_CLANG ?= clang
 
-CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -Wformat=2 -Werror -g -O2 $(INCLUDES)
-SAN_FLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -fsanitize=undefined -g -O1 $(INCLUDES)
+# Do not embed absolute paths (in particular the checkout location) in the debug
+# info of the gate binaries.
+PREFIX_MAP = -ffile-prefix-map=$(CURDIR)=. -ffile-prefix-map=$(CURDIR)/..=.
+
+# SQLite3 development files: pkg-config covers MSYS2/CI installs, otherwise the
+# compiler's own search path is used. For a custom prefix set SQLITE_CFLAGS and
+# SQLITE_LIBS on the command line or in ../Makefile.local, e.g.
+#   mingw32-make SQLITE_CFLAGS=-IC:/deps/sqlite/include \
+#                SQLITE_LIBS=C:/deps/sqlite/lib/libsqlite3.a gate
+SQLITE_CFLAGS ?= $(shell pkg-config --cflags sqlite3 2>NUL)
+SQLITE_LIBS ?= $(shell pkg-config --libs sqlite3 2>NUL)
+ifeq ($(strip $(SQLITE_LIBS)),)
+SQLITE_LIBS := -lsqlite3
+endif
+
+INCLUDES = $(SQLITE_CFLAGS) -I..
+SQLITE_LIB = $(SQLITE_LIBS) -lbcrypt
+
+CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -Wformat=2 -Werror -g -O2 $(PREFIX_MAP) $(INCLUDES)
+SAN_FLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -fsanitize=undefined -g -O1 $(PREFIX_MAP) $(INCLUDES)
 
 DEPS_SRC = port.c ../zoom/port.c ../geometry/port.c ../ids/port.c ../navigation/port.c ../blocker/port.c ../store/port.c
 

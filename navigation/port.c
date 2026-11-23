@@ -521,6 +521,21 @@ bool zephium_nav_is_allowed(const char *url_str, size_t len) {
     return true;
 }
 
+/* Query strings and fragments are where URLs carry credentials, session tokens and
+ * search terms. Anything persisted (logs, history, diagnostics) goes through this
+ * helper, which keeps only scheme, host, port and path. */
+bool zephium_nav_redact_url(const char *url, size_t url_len, char *out_url, size_t out_len) {
+    if (!url || !out_url || out_len == 0 || url_len > ZEPHIUM_MAX_URL_BYTES) return false;
+    if (url_len >= out_len) return false;
+
+    size_t keep = 0;
+    while (keep < url_len && url[keep] != '?' && url[keep] != '#') ++keep;
+
+    memcpy(out_url, url, keep);
+    out_url[keep] = '\0';
+    return true;
+}
+
 static bool url_escape_append(char *dest, size_t dest_cap, size_t *pos, const char *src, size_t src_len) {
     for (size_t i = 0; i < src_len; ++i) {
         unsigned char c = (unsigned char)src[i];

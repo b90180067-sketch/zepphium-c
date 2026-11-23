@@ -5,6 +5,10 @@
 #include <string.h>
 #include <time.h>
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 struct zephium_store {
     sqlite3 *db;
 };
@@ -39,33 +43,73 @@ static const char SCHEMA_SQL[] =
     "  value TEXT NOT NULL"
     ");";
 
-bool zephium_store_open(const char *path, zephium_store_t **out_store) {
-    if (!path || !out_store) return false;
+#if !defined(_WIN32)
+/* The profile holds the complete browsing history, so it belongs to this user
+ * only. Windows has no POSIX modes (the per-user profile directory ACL applies
+ * there); elsewhere the file is created under a 077 umask ("mode 0600") and a
+ * profile written by an older build is tightened explicitly. */
+static void restrict_file_mode(const char *path) {
+    if (path && *path) (void)chmod(path, 0600);
+}
 
-    zephium_store_t *s = (zephium_store_t *)calloc(1, sizeof(zephium_store_t));
-    if (!s) return false;
+/* -wal and -shm hold the same data as the database; sqlite creates them while the
+ * pragmas and schema below run, i.e. inside the umask window, but an existing
+ * pair from an older build is chmod()ed here as well. */
+static void restrict_profile_files(const char *path) {
+    restrict_file_mode(path);
+    size_t len = strlen(path);
+    char *side = (char *)malloc(len + 5);
+    if (!side) return;
+    memcpy(side, path, len);
+    memcpy(side + len, "-wal", 5);
+    restrict_file_mode(side);
+    memcpy(side + len, "-shm", 5);
+    restrict_file_mode(side);
+    free(side);
+}
+#endif /* !_WIN32 */
 
-    int rc = sqlite3_open_v2(path, &s->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
-    if (rc != SQLITE_OK) {
-        free(s);
-        return false;
-    }
+static bool open_database(const char *path, sqlite3 **out_db) {
+    int rc = sqlite3_open_v2(path, out_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+    if (rc != SQLITE_OK) return false;
 
     /* WAL + NORMAL keep the navigation path responsive: the profile usually lives
      * on a DrvFs (/mnt/c) mount, where the default rollback journal costs ~26ms
      * per commit versus ~8ms in WAL mode. Both pragmas are best-effort (an
      * in-memory database simply keeps its own journal mode). */
-    (void)sqlite3_exec(s->db,
+    (void)sqlite3_exec(*out_db,
                        "PRAGMA journal_mode = WAL;"
                        "PRAGMA synchronous = NORMAL;"
                        "PRAGMA temp_store = MEMORY;",
                        NULL, NULL, NULL);
 
     char *err_msg = NULL;
-    rc = sqlite3_exec(s->db, SCHEMA_SQL, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) {
-        if (err_msg) sqlite3_free(err_msg);
-        sqlite3_close(s->db);
+    rc = sqlite3_exec(*out_db, SCHEMA_SQL, NULL, NULL, &err_msg);
+    if (err_msg) sqlite3_free(err_msg);
+    return rc == SQLITE_OK;
+}
+
+bool zephium_store_open(const char *path, zephium_store_t **out_store) {
+    if (!path || !out_store) return false;
+
+    zephium_store_t *s = (zephium_store_t *)calloc(1, sizeof(zephium_store_t));
+    if (!s) return false;
+
+    bool ok;
+#if defined(_WIN32)
+    ok = open_database(path, &s->db);
+#else
+    bool on_disk = (strcmp(path, ":memory:") != 0);
+    mode_t saved_umask = on_disk ? umask(0077) : 0;
+    ok = open_database(path, &s->db);
+    if (on_disk) {
+        umask(saved_umask);
+        restrict_profile_files(path);
+    }
+#endif
+
+    if (!ok) {
+        if (s->db) sqlite3_close(s->db);
         free(s);
         return false;
     }

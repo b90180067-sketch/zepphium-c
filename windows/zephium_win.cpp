@@ -11,6 +11,7 @@
 #include <windowsx.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <sddl.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cwchar>
@@ -126,6 +127,32 @@ static std::wstring Utf8ToWide(const char *s) {
     std::wstring out((size_t)len - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s, -1, &out[0], len);
     return out;
+}
+
+/* The log records every page the user visited, so URLs are written without their
+ * query string and fragment: those carry session tokens, signed CDN parameters and
+ * search terms. The portable C helper decides what "redacted" means. */
+static std::wstring RedactUrl(const std::wstring &url) {
+    std::string utf8 = WideToUtf8(url);
+    char safe[ZEPHIUM_MAX_URL_BYTES];
+    if (!zephium_nav_redact_url(utf8.c_str(), utf8.size(), safe, sizeof(safe))) {
+        return std::wstring(L"(unprintable)");
+    }
+    return Utf8ToWide(safe);
+}
+
+/* Windows has no POSIX modes, so the equivalent of "mode 0600" is an explicit DACL:
+ * SYSTEM and the file owner, nobody else. Best effort - failing to tighten the ACL
+ * must never stop the browser from starting. */
+static void RestrictFileToOwner(const std::wstring &path) {
+    if (path.empty()) return;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;FA;;;SY)(A;;FA;;;OW)", SDDL_REVISION_1, &sd, nullptr)) {
+        return;
+    }
+    (void)SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, sd);
+    LocalFree(sd);
 }
 
 static std::wstring ExeDirectory() {
@@ -504,7 +531,7 @@ static int AddTab(const std::wstring &raw_url, bool activate, bool reuse_initial
 
     g_tabs.push_back(tab);
     const int index = (int)g_tabs.size() - 1;
-    Log(L"new tab %d id=%d url=%ls (core tabs=%zu)", index, tab->id, tab->url.c_str(), g_core->tab_count);
+    Log(L"new tab %d id=%d url=%ls (core tabs=%zu)", index, tab->id, RedactUrl(tab->url).c_str(), g_core->tab_count);
 
     if (g_env) CreateTabController(index);
     if (activate || g_active < 0) ActivateTab(index);
@@ -553,7 +580,7 @@ static void SleepTab(int index) {
         tab->view->Release();
         tab->view = nullptr;
     }
-    Log(L"tab %d hibernated, url=%ls", index, tab->url.c_str());
+    Log(L"tab %d hibernated, url=%ls", index, RedactUrl(tab->url).c_str());
     UpdateTabStrip();
 }
 
@@ -563,7 +590,7 @@ static void WakeTab(int index) {
     if (!tab || !tab->sleeping) return;
     tab->sleeping = false;
     tab->creating = true;
-    Log(L"tab %d waking, url=%ls", index, tab->url.c_str());
+    Log(L"tab %d waking, url=%ls", index, RedactUrl(tab->url).c_str());
     CreateTabController(index);
     UpdateTabStrip();
 }
@@ -589,7 +616,7 @@ static void ActivateTab(int index) {
         tab->ctrl->put_IsVisible(TRUE);
         GiveViewFocus(tab);
     }
-    if (changed) Log(L"activate tab %d (%ls)", index, tab->url.c_str());
+    if (changed) Log(L"activate tab %d (%ls)", index, RedactUrl(tab->url).c_str());
     SyncActiveView();
     UpdateTabStrip();
 }
@@ -653,13 +680,13 @@ static void NavigateToResolved(const std::wstring &raw) {
 
     std::string input = WideToUtf8(raw);
     if (!zephium_browser_navigate(g_core, input.c_str())) {
-        Log(L"navigation refused by core: %ls", raw.c_str());
+        Log(L"navigation refused by core: %ls", RedactUrl(raw).c_str());
         return;
     }
     zephium_tab_t *core_tab = zephium_browser_get_tab(g_core, (size_t)g_active);
     std::wstring resolved = core_tab ? Utf8ToWide(core_tab->current_url) : raw;
     tab->url = resolved;
-    Log(L"navigate tab %d: %ls -> %ls", g_active, raw.c_str(), resolved.c_str());
+    Log(L"navigate tab %d: %ls -> %ls", g_active, RedactUrl(raw).c_str(), RedactUrl(resolved).c_str());
 
     if (tab->sleeping) {
         WakeTab(g_active);
@@ -723,7 +750,7 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
     if (!tab->url.empty() && tab->url != L"about:blank") {
         tab->view->Navigate(tab->url.c_str());
     }
-    Log(L"tab %d ready (id=%d, url=%ls)", index, tab->id, tab->url.c_str());
+    Log(L"tab %d ready (id=%d, url=%ls)", index, tab->id, RedactUrl(tab->url).c_str());
 
     if (index == g_active) {
         g_zoom_percent = zoom;
@@ -958,6 +985,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g_exe_dir = ExeDirectory();
     g_log_path = g_exe_dir + L"\\zephium_win.log";
     Log(L"---- Zephium Windows shell starting ----");
+    RestrictFileToOwner(g_log_path);
 
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -984,6 +1012,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         MessageBoxW(nullptr, L"Could not open the SQLite profile database.",
                     L"Zephium", MB_ICONERROR | MB_OK);
         return 1;
+    }
+    /* The profile is created lazily above; -wal/-shm appear with it, so all three
+     * are tightened right after the core opens the database. */
+    {
+        std::wstring db_file = Utf8ToWide(db_path.c_str());
+        RestrictFileToOwner(db_file);
+        RestrictFileToOwner(db_file + L"-wal");
+        RestrictFileToOwner(db_file + L"-shm");
     }
 
     WNDCLASSEXW wc = {};

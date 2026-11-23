@@ -103,7 +103,15 @@ bool zephium_browser_navigate(zephium_browser_context_t *ctx, const char *raw_in
 
     int64_t now_ms = (int64_t)time(NULL) * 1000;
     if (ctx->store) {
-        zephium_store_record_visit(ctx->store, destination, tab->title[0] ? tab->title : destination, now_ms);
+        /* History is plain text that lives on disk for months, so it stores the
+         * address without its query string and fragment: that is where session
+         * tokens, e-mail addresses and search terms usually sit. The tab keeps the
+         * full URL for reloading. */
+        char history_url[ZEPHIUM_MAX_URL_BYTES];
+        if (zephium_nav_redact_url(destination, dlen, history_url, sizeof(history_url))) {
+            zephium_store_record_visit(ctx->store, history_url,
+                                       tab->title[0] ? tab->title : history_url, now_ms);
+        }
     }
     return true;
 }

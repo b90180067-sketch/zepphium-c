@@ -39,6 +39,7 @@ windows/*.WebView2/
 # ---- Local scratch ----
 .tmp_*
 .git-msg.txt
+Makefile.local
 
 # ---- Local verification artifacts ----
 yt_playback_verified.png

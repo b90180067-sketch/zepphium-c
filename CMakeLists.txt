@@ -25,6 +25,12 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         -Wformat=2
         -Wno-deprecated-declarations
     )
+    # Never embed the checkout location in the binaries: -ffile-prefix-map
+    # rewrites the source/build paths in debug info and in __FILE__.
+    add_compile_options(
+        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+        "-ffile-prefix-map=${CMAKE_BINARY_DIR}=."
+    )
     # GCC-only diagnostics that guard the bounded string helpers. Clang does
     # not know these flag names and would reject them under -Werror.
     if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
@@ -70,7 +76,7 @@ foreach(_zephium_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 
 # SQLite3: use CMake's package module first, then pkg-config. Never assume a
-# toolchain-specific install prefix such as C:/mingw64/opt.
+# toolchain-specific install prefix (pass CMAKE_PREFIX_PATH instead).
 find_package(SQLite3 QUIET)
 if (NOT SQLite3_FOUND)
     find_package(PkgConfig QUIET)

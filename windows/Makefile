@@ -1,15 +1,31 @@
 SHELL = cmd.exe
 
+# Optional machine-local overrides (toolchain paths, SQLite3 prefix). Never
+# committed - see "Gates" in README.md. Included first so it wins over the
+# defaults below.
+-include ../Makefile.local
+
 # Zephium Windows shell (Win32 + WebView2), build with: mingw32-make -C windows
-GCC = C:/mingw64/bin/gcc.exe
-GXX = C:/mingw64/bin/g++.exe
-SQLITE = C:/mingw64/opt/lib/libsqlite3.a
+GCC ?= gcc
+GXX ?= g++
 SDK_INC = sdk/build/native/include
 SDK_X64 = sdk\build\native\x64
 
-CFLAGS = -std=c17 -Wall -Wextra -O2 -I.. -IC:/mingw64/opt/include
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -DUNICODE -D_UNICODE -I.. -I$(SDK_INC)
-LIBS = $(SQLITE) -lole32 -luser32 -lgdi32 -lshell32 -lbcrypt
+# SQLite3 development files: pkg-config covers MSYS2/CI installs, otherwise the
+# compiler's own search path is used. For a custom prefix set SQLITE_CFLAGS and
+# SQLITE_LIBS on the command line or in ../Makefile.local.
+SQLITE_CFLAGS ?= $(shell pkg-config --cflags sqlite3 2>NUL)
+SQLITE_LIBS ?= $(shell pkg-config --libs sqlite3 2>NUL)
+ifeq ($(strip $(SQLITE_LIBS)),)
+SQLITE_LIBS := -lsqlite3
+endif
+
+# Do not embed absolute paths (in particular the checkout location) in the binaries.
+PREFIX_MAP = -ffile-prefix-map=$(CURDIR)=. -ffile-prefix-map=$(CURDIR)/..=.
+
+CFLAGS = -std=c17 -Wall -Wextra -O2 -I.. $(SQLITE_CFLAGS) $(PREFIX_MAP)
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -DUNICODE -D_UNICODE -I.. -I$(SDK_INC) $(PREFIX_MAP)
+LIBS = $(SQLITE_LIBS) -lole32 -luser32 -lgdi32 -lshell32 -lbcrypt -ladvapi32
 
 CORE_OBJS = obj/zoom_port.o obj/geometry_port.o obj/ids_port.o obj/navigation_port.o obj/blocker_port.o obj/store_port.o obj/browser_core_port.o
 

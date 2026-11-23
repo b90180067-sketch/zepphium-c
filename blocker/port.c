@@ -1,5 +1,7 @@
 #include "port.h"
 
+#include "../browser_core/safe_string.h"
+
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -47,12 +49,15 @@ bool zephium_blocker_simplify_canonical_host_boundary(const char *pattern, char 
     if (labels < 2) return false;
 
     const char *replacement_suffix = "[^A-Za-z0-9_.%-]";
-    size_t needed = prefix_len + host_len + strlen(replacement_suffix) + 1;
+    size_t replacement_len = strlen(replacement_suffix);
+    size_t needed = prefix_len + host_len + replacement_len + 1;
     if (out_cap < needed) return false;
 
     memcpy(out_buf, PREFIX, prefix_len);
     memcpy(out_buf + prefix_len, host_start, host_len);
-    strcpy(out_buf + prefix_len + host_len, replacement_suffix);
+    (void)zephium_strcpy_safe(out_buf + prefix_len + host_len,
+                              out_cap - prefix_len - host_len,
+                              replacement_suffix);
 
     return true;
 }
@@ -100,38 +105,74 @@ static const char *ACTION_NAMES[] = {
     "make-https"
 };
 
+static bool json_append_raw(char *out_json, size_t json_cap, size_t *pos, const char *text) {
+    size_t len = strlen(text);
+    if (*pos + len >= json_cap) return false;
+    memcpy(out_json + *pos, text, len);
+    *pos += len;
+    out_json[*pos] = '\0';
+    return true;
+}
+
+/* Appends text as the body of a JSON string. URL filters are regular expressions
+ * full of backslashes, and every one of them has to be doubled for JSON;
+ * embedding the regexes verbatim produced a document WebKit rejected with
+ * "Failed to parse the JSON String.", i.e. no filter at all. */
+static bool json_append_escaped(char *out_json, size_t json_cap, size_t *pos, const char *text) {
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+        char scratch[8];
+        size_t len;
+        if (*p == '"' || *p == '\\') {
+            scratch[0] = '\\';
+            scratch[1] = (char)*p;
+            len = 2;
+        } else if (*p < 0x20) {
+            int written = snprintf(scratch, sizeof(scratch), "\\u%04x", (unsigned int)*p);
+            if (written < 0) return false;
+            len = (size_t)written;
+        } else {
+            scratch[0] = (char)*p;
+            len = 1;
+        }
+        if (*pos + len >= json_cap) return false;
+        memcpy(out_json + *pos, scratch, len);
+        *pos += len;
+        out_json[*pos] = '\0';
+    }
+    return true;
+}
+
 size_t zephium_blocker_rules_to_webkit_json(const zephium_blocker_rule_t *rules,
                                             size_t num_rules,
                                             char *out_json,
                                             size_t json_cap) {
     if (!rules || !out_json || json_cap < 3) return 0;
+
     size_t pos = 0;
     out_json[pos++] = '[';
-
-    for (size_t i = 0; i < num_rules; ++i) {
-        if (i > 0) {
-            if (pos + 1 >= json_cap) return 0;
-            out_json[pos++] = ',';
-        }
-        int written = snprintf(out_json + pos, json_cap - pos,
-                               "{\"trigger\":{\"url-filter\":\"%s\"},\"action\":{\"type\":\"%s\"",
-                               rules[i].url_filter, ACTION_NAMES[rules[i].action]);
-        if (written < 0 || (size_t)written >= json_cap - pos) return 0;
-        pos += (size_t)written;
-
-        if (rules[i].action == ZEPHIUM_ACTION_CSS_DISPLAY_NONE && rules[i].selector) {
-            written = snprintf(out_json + pos, json_cap - pos, ",\"selector\":\"%s\"", rules[i].selector);
-            if (written < 0 || (size_t)written >= json_cap - pos) return 0;
-            pos += (size_t)written;
-        }
-        if (pos + 2 >= json_cap) return 0;
-        out_json[pos++] = '}';
-        out_json[pos++] = '}';
-    }
-
-    if (pos + 2 >= json_cap) return 0;
-    out_json[pos++] = ']';
     out_json[pos] = '\0';
 
+    for (size_t i = 0; i < num_rules; ++i) {
+        if (!rules[i].url_filter) return 0;
+        if ((unsigned int)rules[i].action >=
+            (unsigned int)(sizeof(ACTION_NAMES) / sizeof(ACTION_NAMES[0]))) {
+            return 0;
+        }
+        if (i > 0 && !json_append_raw(out_json, json_cap, &pos, ",")) return 0;
+        if (!json_append_raw(out_json, json_cap, &pos, "{\"trigger\":{\"url-filter\":\"")) return 0;
+        if (!json_append_escaped(out_json, json_cap, &pos, rules[i].url_filter)) return 0;
+        if (!json_append_raw(out_json, json_cap, &pos, "\"},\"action\":{\"type\":\"")) return 0;
+        if (!json_append_escaped(out_json, json_cap, &pos, ACTION_NAMES[rules[i].action])) return 0;
+        if (!json_append_raw(out_json, json_cap, &pos, "\"")) return 0;
+
+        if (rules[i].action == ZEPHIUM_ACTION_CSS_DISPLAY_NONE && rules[i].selector) {
+            if (!json_append_raw(out_json, json_cap, &pos, ",\"selector\":\"")) return 0;
+            if (!json_append_escaped(out_json, json_cap, &pos, rules[i].selector)) return 0;
+            if (!json_append_raw(out_json, json_cap, &pos, "\"")) return 0;
+        }
+        if (!json_append_raw(out_json, json_cap, &pos, "}}")) return 0;
+    }
+
+    if (!json_append_raw(out_json, json_cap, &pos, "]")) return 0;
     return pos;
 }

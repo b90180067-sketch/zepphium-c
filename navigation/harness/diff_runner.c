@@ -155,6 +155,14 @@ int main(int argc, char **argv) {
                 if (ok && strcmp(act, exp) == 0) passed++;
                 else { failed++; fprintf(stderr, "MISMATCH external_app_link('%s'): exp '%s', got '%s'\n", arg, exp, act); }
             }
+        } else if (strstr(line, "\"fn\":\"redact_url\"")) {
+            if (!has_arg) { failed++; continue; }
+            char act[ZEPHIUM_MAX_URL_BYTES] = {0};
+            char exp[4096] = {0};
+            bool ok = zephium_nav_redact_url(arg, strlen(arg), act, sizeof(act));
+            extract_json_result_str(line, exp, sizeof(exp));
+            if (ok && strcmp(act, exp) == 0) passed++;
+            else { failed++; fprintf(stderr, "MISMATCH redact_url('%s'): exp '%s', got '%s'\n", arg, exp, act); }
         } else if (strstr(line, "\"fn\":\"app_link_scheme\"")) {
             if (!has_arg) { failed++; continue; }
             bool act = zephium_nav_app_link_scheme(arg, strlen(arg));

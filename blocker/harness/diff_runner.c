@@ -131,6 +131,35 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+        } else if (strstr(line, "\"fn\":\"rules_to_webkit_json\"")) {
+            zephium_blocker_rule_t rule;
+            rule.url_filter = arg;
+            rule.resource_types = ZEPHIUM_RES_ALL;
+            rule.action = ZEPHIUM_ACTION_BLOCK;
+            rule.selector = NULL;
+
+            char act[4096] = {0};
+            size_t written = zephium_blocker_rules_to_webkit_json(&rule, 1, act, sizeof(act));
+            const char *res_p = strstr(line, "\"result\":\"");
+            if (written == 0 || !res_p) {
+                failed++;
+                fprintf(stderr, "MISMATCH rules_to_webkit_json('%s'): no output\n", arg);
+            } else {
+                res_p += 10;
+                char raw[4096] = {0};
+                size_t i = 0;
+                while (*res_p && !(res_p[0] == '"' && res_p[-1] != '\\') && i + 1 < sizeof(raw)) {
+                    raw[i++] = *res_p++;
+                }
+                raw[i] = '\0';
+                char exp[4096] = {0};
+                unescape_json(raw, exp, sizeof(exp));
+                if (strcmp(act, exp) == 0) passed++;
+                else {
+                    failed++;
+                    fprintf(stderr, "MISMATCH rules_to_webkit_json('%s'):\n  exp '%s'\n  got '%s'\n", arg, exp, act);
+                }
+            }
         }
     }
 

@@ -40,15 +40,12 @@ zephium_tab_t *zephium_browser_new_tab(zephium_browser_context_t *ctx, const cha
     const char *target = (url && *url) ? url : "about:blank";
     char destination[ZEPHIUM_MAX_URL_BYTES];
     if (zephium_nav_classify(target, strlen(target), destination, sizeof(destination))) {
-        size_t dlen = strlen(destination);
-        if (dlen < sizeof(tab->current_url)) {
-            memcpy(tab->current_url, destination, dlen + 1);
-        }
+        (void)zephium_strcpy_safe(tab->current_url, sizeof(tab->current_url), destination);
     } else {
-        strcpy(tab->current_url, "about:blank");
+        (void)zephium_strcpy_safe(tab->current_url, sizeof(tab->current_url), "about:blank");
     }
 
-    strcpy(tab->title, "New Tab");
+    (void)zephium_strcpy_safe(tab->title, sizeof(tab->title), "New Tab");
     ctx->active_tab_index = ctx->tab_count;
     ctx->tab_count++;
 
@@ -87,12 +84,7 @@ zephium_tab_t *zephium_browser_get_tab(zephium_browser_context_t *ctx, size_t in
 
 bool zephium_browser_set_tab_title(zephium_browser_context_t *ctx, size_t index, const char *title) {
     if (!ctx || index >= ctx->tab_count || !title) return false;
-    size_t len = strlen(title);
-    if (len >= sizeof(ctx->tabs[index].title)) {
-        len = sizeof(ctx->tabs[index].title) - 1;
-    }
-    memcpy(ctx->tabs[index].title, title, len);
-    ctx->tabs[index].title[len] = '\0';
+    (void)zephium_strcpy_safe(ctx->tabs[index].title, sizeof(ctx->tabs[index].title), title);
     return true;
 }
 
@@ -107,11 +99,19 @@ bool zephium_browser_navigate(zephium_browser_context_t *ctx, const char *raw_in
 
     size_t dlen = strlen(destination);
     if (dlen >= sizeof(tab->current_url)) return false;
-    memcpy(tab->current_url, destination, dlen + 1);
+    (void)zephium_strcpy_safe(tab->current_url, sizeof(tab->current_url), destination);
 
     int64_t now_ms = (int64_t)time(NULL) * 1000;
     if (ctx->store) {
-        zephium_store_record_visit(ctx->store, destination, tab->title[0] ? tab->title : destination, now_ms);
+        /* History is plain text that lives on disk for months, so it stores the
+         * address without its query string and fragment: that is where session
+         * tokens, e-mail addresses and search terms usually sit. The tab keeps the
+         * full URL for reloading. */
+        char history_url[ZEPHIUM_MAX_URL_BYTES];
+        if (zephium_nav_redact_url(destination, dlen, history_url, sizeof(history_url))) {
+            zephium_store_record_visit(ctx->store, history_url,
+                                       tab->title[0] ? tab->title : history_url, now_ms);
+        }
     }
     return true;
 }

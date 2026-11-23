@@ -7,6 +7,8 @@
 
 #include "port.h"
 
+#include "../browser_core/safe_string.h"
+
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -168,7 +170,7 @@ static bool parse_url_components(const char *url_str, size_t len, parsed_url_t *
         out->path[path_len] = '\0';
         curr = q_or_f;
     } else {
-        strcpy(out->path, "/");
+        (void)zephium_strcpy_safe(out->path, sizeof(out->path), "/");
     }
 
     if (curr < end && *curr == '?') {
@@ -260,6 +262,246 @@ static bool has_leading_scheme_separator(const char *s, size_t len) {
     return valid_scheme_str(s, (size_t)(sep - s));
 }
 
+/* ---------------------------------------------------------------------------
+ * Loopback / private-network guard
+ *
+ * zephium_nav_is_allowed() is the last gate before a URL may be committed in a
+ * tab, so it must never hand the network stack an address that reaches the
+ * user's own machine or LAN: 127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12,
+ * 192.168.0.0/16, 169.254.0.0/16 (the cloud metadata endpoint 169.254.169.254
+ * lives there), fc00::/7, fe80::/10, 0.0.0.0/8 and the "localhost" name are all
+ * refused. Internal pages keep working through about:blank and RESERVED_HOSTS,
+ * neither of which this guard changes.
+ *
+ * Browsers accept non-canonical IPv4 spellings, so every number is parsed the
+ * way inet_aton() does: one to four parts, the last part filling the remaining
+ * bytes, each part decimal, 0-prefixed octal or 0x-prefixed hex. "127.1",
+ * "0x7f000001" and "0177.0.0.1" therefore all reach 127.0.0.1 and are refused.
+ * ------------------------------------------------------------------------- */
+
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* inet_aton()-style IPv4 literal: decimal, 0-prefixed octal and 0x-prefixed hex
+ * numbers, plus the one-to-three part shorthands ("127.1" == 127.0.0.1). */
+static bool parse_ipv4_target(const char *s, size_t len, unsigned char out[4]) {
+    if (len == 0 || len > 63) return false;
+
+    unsigned long parts[4] = {0, 0, 0, 0};
+    size_t part_count = 0;
+    size_t i = 0;
+
+    while (i < len) {
+        if (part_count == 4) return false;
+
+        unsigned int base = 10;
+        if (i + 2 < len && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+            base = 16;
+            i += 2;
+        } else if (i + 2 < len && s[i] == '0' && s[i + 1] != '.') {
+            base = 8;
+            i += 1;
+        }
+
+        unsigned long value = 0;
+        size_t digits = 0;
+        while (i < len && s[i] != '.') {
+            int digit;
+            if (base == 16) {
+                digit = hex_value(s[i]);
+            } else if (s[i] >= '0' && s[i] <= '9') {
+                digit = s[i] - '0';
+            } else {
+                digit = -1;
+            }
+            if (digit < 0 || (unsigned int)digit >= base) return false;
+            if (value > (0xFFFFFFFFul - (unsigned long)digit) / base) return false;
+            value = value * base + (unsigned long)digit;
+            ++digits;
+            ++i;
+        }
+        if (digits == 0) return false;
+
+        parts[part_count] = value;
+        ++part_count;
+
+        if (i < len) { /* s[i] == '.' */
+            ++i;
+            if (i == len) return false;
+        }
+    }
+
+    /* Every field except the last one is a single byte. */
+    for (size_t p = 0; p + 1 < part_count; ++p) {
+        if (parts[p] > 255ul) return false;
+    }
+
+    unsigned long ip;
+    switch (part_count) {
+        case 1:
+            ip = parts[0];
+            break;
+        case 2:
+            if (parts[1] > 0xFFFFFFul) return false;
+            ip = (parts[0] << 24) | parts[1];
+            break;
+        case 3:
+            if (parts[2] > 0xFFFFul) return false;
+            ip = (parts[0] << 24) | (parts[1] << 16) | parts[2];
+            break;
+        default:
+            if (parts[3] > 255ul) return false;
+            ip = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+            break;
+    }
+
+    out[0] = (unsigned char)((ip >> 24) & 0xFFul);
+    out[1] = (unsigned char)((ip >> 16) & 0xFFul);
+    out[2] = (unsigned char)((ip >> 8) & 0xFFul);
+    out[3] = (unsigned char)(ip & 0xFFul);
+    return true;
+}
+
+static bool ipv4_is_private(const unsigned char ip[4]) {
+    if (ip[0] == 0) return true;                           /* 0.0.0.0/8 "this host" */
+    if (ip[0] == 127) return true;                         /* 127.0.0.0/8 loopback */
+    if (ip[0] == 10) return true;                          /* 10.0.0.0/8 */
+    if (ip[0] == 172 && (ip[1] & 0xF0) == 16) return true; /* 172.16.0.0/12 */
+    if (ip[0] == 192 && ip[1] == 168) return true;         /* 192.168.0.0/16 */
+    if (ip[0] == 169 && ip[1] == 254) return true;         /* 169.254.0.0/16 link-local */
+    return false;
+}
+
+/* RFC 4291 text form: hex groups with at most one "::", and an optional trailing
+ * dotted-quad for the last 32 bits ("::ffff:127.0.0.1"). */
+static bool parse_ipv6_target(const char *s, size_t len, unsigned char out[16]) {
+    if (len < 2 || len > 64) return false;
+
+    unsigned char buf[16] = {0};
+    int filled = 0;
+    int zeros_at = -1;
+    size_t pos = 0;
+
+    if (s[0] == ':') {
+        if (s[1] != ':') return false;
+        zeros_at = 0;
+        pos = 2;
+        if (pos == len) {
+            memset(out, 0, 16);
+            return true;
+        }
+    }
+
+    for (;;) {
+        const char *token = s + pos;
+        size_t tlen = 0;
+        while (pos + tlen < len && s[pos + tlen] != ':') ++tlen;
+        if (tlen == 0) return false; /* ":::", leading single ':' or dangling ':' */
+
+        if (memchr(token, '.', tlen) != NULL) {
+            unsigned char quad[4];
+            if (!parse_ipv4_target(token, tlen, quad)) return false;
+            if (filled + 4 > 16) return false;
+            memcpy(buf + filled, quad, 4);
+            filled += 4;
+        } else {
+            if (tlen > 4) return false;
+            unsigned int value = 0;
+            for (size_t k = 0; k < tlen; ++k) {
+                int digit = hex_value(token[k]);
+                if (digit < 0) return false;
+                value = (value << 4) | (unsigned int)digit;
+            }
+            if (filled + 2 > 16) return false;
+            buf[filled] = (unsigned char)((value >> 8) & 0xFFu);
+            buf[filled + 1] = (unsigned char)(value & 0xFFu);
+            filled += 2;
+        }
+
+        pos += tlen;
+        if (pos == len) break;
+
+        if (pos + 1 < len && s[pos + 1] == ':') {
+            if (zeros_at >= 0) return false; /* two "::" */
+            zeros_at = filled;
+            pos += 2;
+            if (pos == len) break;
+        } else {
+            ++pos;
+            if (pos == len) return false; /* trailing single ':' */
+        }
+    }
+
+    if (zeros_at < 0) {
+        if (filled != 16) return false;
+        memcpy(out, buf, 16);
+        return true;
+    }
+
+    size_t tail = (size_t)(16 - filled);
+    memcpy(out, buf, (size_t)zeros_at);
+    memset(out + zeros_at, 0, tail);
+    memcpy(out + zeros_at + tail, buf + zeros_at, (size_t)(filled - zeros_at));
+    return true;
+}
+
+static bool ipv6_prefix_is_zero(const unsigned char ip[16], size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (ip[i] != 0) return false;
+    }
+    return true;
+}
+
+static bool ipv6_is_private(const unsigned char ip[16]) {
+    /* :: (unspecified) and ::1 (loopback). */
+    if (ipv6_prefix_is_zero(ip, 16)) return true;
+    if (ipv6_prefix_is_zero(ip, 15) && ip[15] == 1) return true;
+
+    /* fc00::/7 unique-local, fe80::/10 link-local. */
+    if ((ip[0] & 0xFE) == 0xFC) return true;
+    if (ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80) return true;
+
+    /* IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) literals reach
+     * the same host as the embedded IPv4 address, so reuse the IPv4 rules. */
+    if (ipv6_prefix_is_zero(ip, 10)) {
+        if (ip[10] == 0xFF && ip[11] == 0xFF) return ipv4_is_private(ip + 12);
+        if (ip[10] == 0 && ip[11] == 0) return ipv4_is_private(ip + 12);
+    }
+    return false;
+}
+
+/* True when a host names the local machine or the local network. The caller
+ * passes the lower-cased host without userinfo or port; a trailing dot and a
+ * bracketed IPv6 literal with an optional zone id are handled here. */
+static bool host_is_local_target(const char *host) {
+    size_t len = strlen(host);
+    if (len == 0) return false;
+
+    if (host[0] == '[') {
+        if (len < 3 || host[len - 1] != ']') return false;
+        const char *inner = host + 1;
+        size_t inner_len = len - 2;
+        const char *zone = memchr(inner, '%', inner_len);
+        if (zone) inner_len = (size_t)(zone - inner);
+        unsigned char ip[16];
+        if (!parse_ipv6_target(inner, inner_len, ip)) return false;
+        return ipv6_is_private(ip);
+    }
+
+    while (len > 1 && host[len - 1] == '.') --len; /* "localhost." is "localhost" */
+
+    if (len == 9 && strncmp(host, "localhost", 9) == 0) return true;
+    if (len > 10 && strncmp(host + len - 10, ".localhost", 10) == 0) return true;
+
+    unsigned char ip[4];
+    if (parse_ipv4_target(host, len, ip)) return ipv4_is_private(ip);
+    return false;
+}
+
 bool zephium_nav_is_allowed(const char *url_str, size_t len) {
     if (!url_str || len == 0 || len > ZEPHIUM_MAX_URL_BYTES) return false;
     if (len == 11 && strncmp(url_str, "about:blank", 11) == 0) return true;
@@ -274,7 +516,23 @@ bool zephium_nav_is_allowed(const char *url_str, size_t len) {
     for (size_t i = 0; i < NUM_RESERVED_HOSTS; ++i) {
         if (strcmp(u.host, RESERVED_HOSTS[i]) == 0) return false;
     }
+    if (host_is_local_target(u.host)) return false;
 
+    return true;
+}
+
+/* Query strings and fragments are where URLs carry credentials, session tokens and
+ * search terms. Anything persisted (logs, history, diagnostics) goes through this
+ * helper, which keeps only scheme, host, port and path. */
+bool zephium_nav_redact_url(const char *url, size_t url_len, char *out_url, size_t out_len) {
+    if (!url || !out_url || out_len == 0 || url_len > ZEPHIUM_MAX_URL_BYTES) return false;
+    if (url_len >= out_len) return false;
+
+    size_t keep = 0;
+    while (keep < url_len && url[keep] != '?' && url[keep] != '#') ++keep;
+
+    memcpy(out_url, url, keep);
+    out_url[keep] = '\0';
     return true;
 }
 
@@ -300,7 +558,7 @@ static bool url_escape_append(char *dest, size_t dest_cap, size_t *pos, const ch
 static bool build_search_url(const char *val, size_t val_len, char *out, size_t out_len) {
     size_t base_len = strlen(ZEPHIUM_SEARCH_BASE) + 3;
     if (out_len < base_len + 1) return false;
-    strcpy(out, ZEPHIUM_SEARCH_BASE "?q=");
+    if (zephium_strcpy_safe(out, out_len, ZEPHIUM_SEARCH_BASE "?q=") != 0) return false;
     size_t pos = strlen(out);
 
     if (!url_escape_append(out, out_len, &pos, val, val_len)) return false;
@@ -379,8 +637,7 @@ bool zephium_nav_classify(const char *input, size_t input_len, char *out_url, si
 
     if (slen == 0) {
         if (out_len < 12) return false;
-        strcpy(out_url, "about:blank");
-        return true;
+        return zephium_strcpy_safe(out_url, out_len, "about:blank") == 0;
     }
 
     if (looks_like_local_path(s, slen)) return false;

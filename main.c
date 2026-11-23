@@ -25,19 +25,36 @@
 #endif
 
 static FILE *g_log_file = NULL;
+static const char *g_log_path = NULL;
 
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((unused))
 #endif
 static void zephium_log_init(void) {
     if (g_log_file) return;
+
+#if defined(__linux__)
+    /* The log records which pages and media were loaded, so it belongs to this
+     * user only. umask 077 covers the creation, and the chmod() below also
+     * tightens a log left at 0644 by an older build. */
+    mode_t saved_umask = umask(0077);
+#endif
+
     /* Truncate on start: read_log.py must analyse one session only. Appending
      * kept stale entries from previous runs, so old failures were reported as
      * if they were happening right now. */
     g_log_file = fopen("/tmp/zephium_debug.log", "w");
-    if (!g_log_file) {
+    if (g_log_file) {
+        g_log_path = "/tmp/zephium_debug.log";
+    } else {
         g_log_file = fopen("zephium_debug.log", "w");
+        if (g_log_file) g_log_path = "zephium_debug.log";
     }
+
+#if defined(__linux__)
+    umask(saved_umask);
+    if (g_log_path) (void)chmod(g_log_path, 0600);
+#endif
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -53,7 +70,7 @@ static void zephium_log(const char *level, const char *category, const char *fmt
     if (tm_info) {
         strftime(time_buf, sizeof(time_buf), "%H:%M:%S", tm_info);
     } else {
-        strcpy(time_buf, "unknown");
+        (void)zephium_strcpy_safe(time_buf, sizeof(time_buf), "unknown");
     }
 
     char msg[2048];
@@ -97,6 +114,21 @@ static bool is_running_on_wsl(void) {
     return false;
 }
 
+#if defined(__linux__)
+/* The WebKit sandbox is enabled by default. ZEPHIUM_NO_SANDBOX=1 is the single
+ * opt-out, and it exists only for hosts where WebKit's bubblewrap launcher
+ * cannot start (some WSL2 kernels refuse unprivileged user namespaces). WebKit's
+ * own escape-hatch variable is still honoured, so a shell that exports it gets
+ * the warning below instead of silently running unsandboxed. */
+static bool zephium_sandbox_disabled(void) {
+    const char *opt_out = getenv("ZEPHIUM_NO_SANDBOX");
+    if (opt_out && strcmp(opt_out, "1") == 0) return true;
+
+    const char *webkit_var = getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
+    return webkit_var && *webkit_var && strcmp(webkit_var, "0") != 0;
+}
+#endif /* __linux__ */
+
 /* GStreamer autoplugs NVIDIA (NVDEC) and VA-API video decoders before the CPU
  * ones. On WSLg the CUDA stack is incomplete (libnvrtc is missing) and Mesa runs
  * on llvmpipe, so those elements cannot create a GL context: the first frame
@@ -132,8 +164,13 @@ static void apply_wsl_optimizations(bool force_wsl, bool disable_gpu, bool force
     if (on_wsl) {
         printf("[Zephium] WSL/WSLg environment detected: applying compatibility tuning...\n");
 
-        /* 1. Disable WebKit bubblewrap sandbox because WSL2 lacks unprivileged user namespace mounting */
-        setenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1", 0);
+        /* 1. Keep WebKit's bubblewrap sandbox on. Some WSL2 kernels cannot create
+         * unprivileged user namespaces, which is why this used to be disabled
+         * unconditionally - but the sandbox is a security boundary, so disabling
+         * it is an explicit opt-out (ZEPHIUM_NO_SANDBOX=1) with a warning. */
+        if (zephium_sandbox_disabled()) {
+            setenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1", 1);
+        }
 
         /* 2. Keep accelerated compositing AND the DMA-BUF renderer enabled.
          * WebKitGTK >= 2.4x delivers decoded video frames to the UI process through
@@ -153,11 +190,16 @@ static void apply_wsl_optimizations(bool force_wsl, bool disable_gpu, bool force
         setenv("LIBVA_DRIVER_NAME", "none", 0);
         setenv("WEBKIT_GST_HOLE_PUNCH", "0", 0);
 
-        /* 5. Redirect cache and data directories to Linux native /tmp (tmpfs) to avoid NTFS DrvFs fallocate crashes */
+        /* 5. Redirect cache and data directories to Linux native /tmp (tmpfs) to avoid NTFS DrvFs fallocate crashes.
+         * 0700: XDG_DATA_HOME holds cookies, localStorage and the HTTP cache, i.e.
+         * the user's logged-in sessions. mkdir() does not change an existing
+         * directory, hence the chmod() for trees created by an older build. */
         setenv("XDG_CACHE_HOME", "/tmp/zephium-cache", 0);
         setenv("XDG_DATA_HOME", "/tmp/zephium-data", 0);
-        mkdir("/tmp/zephium-cache", 0755);
-        mkdir("/tmp/zephium-data", 0755);
+        mkdir("/tmp/zephium-cache", 0700);
+        mkdir("/tmp/zephium-data", 0700);
+        (void)chmod("/tmp/zephium-cache", 0700);
+        (void)chmod("/tmp/zephium-data", 0700);
 
         /* 6. Display server selection for WSLg */
         if (force_x11) {
@@ -212,6 +254,9 @@ typedef struct {
     GtkWidget *btn_back;
     GtkWidget *btn_forward;
     GtkWidget *btn_reload;
+    GtkWidget *find_bar;       /* Ctrl+F find-in-page strip, hidden by default */
+    GtkWidget *find_entry;
+    GtkWidget *lbl_find;
     zephium_browser_context_t *core;
     WebKitUserContentFilter *adblock_filter;
     bool disable_gpu;
@@ -223,6 +268,9 @@ typedef struct {
 static zephium_gtk_app_t g_app;
 
 static WebKitWebView *get_active_web_view(zephium_gtk_app_t *app);
+static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool reuse_initial_tab);
+static void on_find_found(WebKitFindController *controller, guint match_count, gpointer user_data);
+static void on_find_not_found(WebKitFindController *controller, gpointer user_data);
 
 static void update_active_tab_ui(zephium_gtk_app_t *app) {
     gint page_idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->notebook));
@@ -331,7 +379,9 @@ static void on_page_diagnostic(WebKitUserContentManager *manager,
 
     g_diag_in_window++;
     g_diag_logged++;
-    zephium_log("WARN", "PAGE_JS_ERROR", "%s", message);
+    /* Page errors routinely embed the full page URL (with its query string) or
+     * form values, so only the first 200 characters reach the log. */
+    zephium_log("WARN", "PAGE_JS_ERROR", "%.200s", message);
     g_free(message);
 }
 
@@ -350,6 +400,92 @@ static void install_page_diagnostics(WebKitUserContentManager *ucm) {
         webkit_user_content_manager_add_script(ucm, script);
         webkit_user_script_unref(script);
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Ad blocking
+ *
+ * The portable blocker module emits WebKit content-blocker JSON; WebKit needs it
+ * compiled into a binary filter, which it does asynchronously in the UI process.
+ * Tabs that already exist when the compilation finishes (the first one always
+ * does) receive the filter through adblock_apply_to_tabs(). Any failure - rules
+ * that do not compile, an unwritable store directory - only costs ad blocking:
+ * pages keep loading.
+ * ------------------------------------------------------------------------- */
+#define ZEPHIUM_ADBLOCK_STORE_IDENTIFIER "zephium-adblock"
+
+static WebKitUserContentFilterStore *g_adblock_store = NULL;
+
+static bool zephium_adblock_enabled(bool cli_disabled) {
+    if (cli_disabled) return false;
+    const char *value = getenv("ZEPHIUM_ADBLOCK");
+    return !(value && strcmp(value, "0") == 0);
+}
+
+/* Give the compiled filter to every tab that already exists. remove_all_filters()
+ * keeps exactly one copy, including in tabs that were created after the filter
+ * became available. */
+static void adblock_apply_to_tabs(WebKitUserContentFilter *filter) {
+    if (!filter || !g_app.notebook) return;
+    gint pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(g_app.notebook));
+    for (gint i = 0; i < pages; ++i) {
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(g_app.notebook), i);
+        if (!page || !WEBKIT_IS_WEB_VIEW(page)) continue;
+        WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(page));
+        if (!ucm) continue;
+        webkit_user_content_manager_remove_all_filters(ucm);
+        webkit_user_content_manager_add_filter(ucm, filter);
+    }
+}
+
+static void on_adblock_filter_ready(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)user_data;
+    GError *error = NULL;
+    WebKitUserContentFilter *filter =
+        webkit_user_content_filter_store_save_finish(WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+    if (!filter) {
+        /* An ad blocker is never worth an error page: browse without it. */
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Content filter did not compile (%s); continuing without ad blocking.",
+                    error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        return;
+    }
+
+    g_app.adblock_filter = filter;
+    adblock_apply_to_tabs(filter);
+    zephium_log("INFO", "ADBLOCK", "Content filter active.");
+}
+
+static void adblock_init(bool cli_disabled) {
+    if (!zephium_adblock_enabled(cli_disabled)) {
+        zephium_log("INFO", "ADBLOCK", "Disabled (ZEPHIUM_ADBLOCK=0 or --no-adblock).");
+        return;
+    }
+
+    char rules[4096];
+    size_t rules_len = zephium_browser_generate_adblock_rules(rules, sizeof(rules));
+    if (rules_len == 0 || rules_len >= sizeof(rules)) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Rule generation failed; continuing without ad blocking.");
+        return;
+    }
+
+    char *store_dir = g_build_filename(g_get_user_cache_dir(), "zephium", "content-filters", NULL);
+    if (g_mkdir_with_parents(store_dir, 0700) != 0) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot create the filter store directory %s; continuing without ad blocking.",
+                    store_dir);
+        g_free(store_dir);
+        return;
+    }
+    g_adblock_store = webkit_user_content_filter_store_new(store_dir);
+    g_free(store_dir);
+
+    GBytes *source = g_bytes_new(rules, rules_len);
+    webkit_user_content_filter_store_save(g_adblock_store, ZEPHIUM_ADBLOCK_STORE_IDENTIFIER, source,
+                                          NULL, on_adblock_filter_ready, NULL);
+    g_bytes_unref(source);
+    zephium_log("INFO", "ADBLOCK", "Compiling %zu bytes of blocker rules...", rules_len);
 }
 
 static WebKitWebView *get_active_web_view(zephium_gtk_app_t *app) {
@@ -384,8 +520,7 @@ static void on_url_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointer 
 
     zephium_tab_t *tab = zephium_browser_get_active_tab(g_app.core);
     if (tab && strcmp(tab->current_url, uri) != 0) {
-        strncpy(tab->current_url, uri, sizeof(tab->current_url) - 1);
-        tab->current_url[sizeof(tab->current_url) - 1] = '\0';
+        (void)zephium_strcpy_safe(tab->current_url, sizeof(tab->current_url), uri);
         update_active_tab_ui(&g_app);
     }
 }
@@ -409,55 +544,35 @@ static void on_title_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointe
     update_active_tab_ui(&g_app);
 }
 
+/* Every URL that reaches a log line or the history table is passed through
+ * zephium_nav_redact_url(): query strings and fragments carry session tokens,
+ * signed CDN parameters and search terms, and this log is written with an fflush
+ * from the UI process while pages load. A full googlevideo URL is ~1KB, so
+ * dropping the query also keeps the lines short. */
+static const char *redacted_url(const char *url, char *buf, size_t buf_len) {
+    if (!url) return "(null)";
+    if (!zephium_nav_redact_url(url, strlen(url), buf, buf_len)) return "(unprintable)";
+    return buf;
+}
+
 static void on_resource_failed(WebKitWebResource *resource,
                               GError *error,
                               gpointer user_data) {
     (void)user_data;
     const gchar *uri = webkit_web_resource_get_uri(resource);
+    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
     /* Code 302 in WebKitNetworkError is WEBKIT_NETWORK_ERROR_CANCELLED (user navigated or redirected).
      * Do not log normal subresource cancellation as an alarming ERROR. */
     if (error && error->code == 302 && error->domain == WEBKIT_NETWORK_ERROR) {
-        zephium_log("DEBUG", "RESOURCE_CANCELLED", "URI: %s (load cancelled / redirected)", uri ? uri : "(null)");
+        zephium_log("DEBUG", "RESOURCE_CANCELLED", "URI: %s (load cancelled / redirected)",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
         return;
     }
     zephium_log("ERROR", "RESOURCE_FAILED", "URI: %s | Error: %s (code: %d, domain: %s)",
-                uri ? uri : "(null)",
+                redacted_url(uri, safe_uri, sizeof(safe_uri)),
                 error ? error->message : "unknown",
                 error ? error->code : 0,
                 error ? g_quark_to_string(error->domain) : "unknown");
-}
-
-/* A full googlevideo URL is ~1KB and these lines are written - with an fflush -
- * from the UI process while the page is loading, so log the compact form only. */
-static void zephium_format_url(const char *uri, char *out, size_t out_size) {
-    size_t olen = 0;
-    out[0] = '\0';
-    if (!uri) {
-        snprintf(out, out_size, "(null)");
-        return;
-    }
-    const char *scheme_end = strstr(uri, "://");
-    if (!scheme_end) {
-        snprintf(out, out_size, "%s", uri);
-        return;
-    }
-    const char *host_end = scheme_end + 3;
-    while (*host_end && *host_end != '/' && *host_end != '?' && *host_end != '#') host_end++;
-    const char *path_end = host_end;
-    while (*path_end && *path_end != '?' && *path_end != '#') path_end++;
-    const char *param_end = path_end;
-    if (*param_end == '?') {
-        param_end++;
-        while (*param_end && *param_end != '&' && *param_end != '#') param_end++;
-    }
-
-    olen = (size_t)(param_end - uri);
-    if (olen > out_size - 4) olen = out_size - 4;
-    memcpy(out, uri, olen);
-    out[olen] = '\0';
-    if (param_end < uri + strlen(uri)) {
-        strncat(out, "...", out_size - strlen(out) - 1);
-    }
 }
 
 static void on_resource_finished(WebKitWebResource *resource,
@@ -465,9 +580,9 @@ static void on_resource_finished(WebKitWebResource *resource,
     (void)user_data;
     const gchar *uri = webkit_web_resource_get_uri(resource);
     if (uri && (strstr(uri, "videoplayback") || strstr(uri, "manifest") || strstr(uri, "m3u8"))) {
-        char compact[256];
-        zephium_format_url(uri, compact, sizeof(compact));
-        zephium_log("INFO", "MEDIA_CHUNK_LOADED", "Media resource loaded: %s", compact);
+        char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+        zephium_log("INFO", "MEDIA_CHUNK_LOADED", "Media resource loaded: %s",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
     }
 }
 
@@ -482,9 +597,9 @@ static void on_resource_load_started(WebKitWebView *web_view,
     g_signal_connect(resource, "finished", G_CALLBACK(on_resource_finished), NULL);
 
     if (uri && (strstr(uri, "videoplayback") || strstr(uri, "blob:") || strstr(uri, "pagead") || strstr(uri, "doubleclick"))) {
-        char compact[256];
-        zephium_format_url(uri, compact, sizeof(compact));
-        zephium_log("INFO", "REQUEST_START", "Request: %s", compact);
+        char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+        zephium_log("INFO", "REQUEST_START", "Request: %s",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
     }
 }
 
@@ -527,8 +642,9 @@ static gboolean on_load_failed(WebKitWebView *web_view,
     (void)web_view;
     (void)load_event;
     (void)user_data;
+    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
     zephium_log("ERROR", "PAGE_LOAD_FAILED", "Failed loading '%s': %s (code: %d)",
-                failing_uri ? failing_uri : "(null)",
+                redacted_url(failing_uri, safe_uri, sizeof(safe_uri)),
                 error ? error->message : "unknown error",
                 error ? error->code : 0);
     return FALSE;
@@ -558,7 +674,9 @@ static gboolean on_decide_policy(WebKitWebView *web_view,
                     return FALSE;
                 }
                 if (!zephium_browser_is_nav_allowed(g_app.core, uri)) {
-                    g_printerr("[Zephium Security] Blocked link navigation to disallowed target: %s\n", uri);
+                    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+                    g_printerr("[Zephium Security] Blocked link navigation to disallowed target: %s\n",
+                               redacted_url(uri, safe_uri, sizeof(safe_uri)));
                     webkit_policy_decision_ignore(decision);
                     return TRUE;
                 }
@@ -568,13 +686,130 @@ static gboolean on_decide_policy(WebKitWebView *web_view,
     return FALSE;
 }
 
+#define ZEPHIUM_PERMISSION_DENIAL_LOG_LIMIT 20
+static unsigned g_denied_permissions = 0;
+
+/* Permission requests are denied by default. Encrypted Media Extensions (EME)
+ * is the only one granted: it is required to play DRM-protected media, it
+ * exposes no device, and the renderer cannot use it without the page already
+ * having asked for it. Camera, microphone, geolocation, notifications, pointer
+ * lock, XR, clipboard, device information and cross-site data access are all
+ * refused, so a page cannot reach the user's hardware, location or other sites
+ * - the browser never had a prompt to ask for them. The legacy "install missing
+ * media plugins" request is refused too: granting it would let any page start a
+ * system package installation; the denial is logged so the cause is visible. */
 static gboolean on_permission_request(WebKitWebView *web_view,
                                       WebKitPermissionRequest *request,
                                       gpointer user_data) {
     (void)web_view;
     (void)user_data;
-    /* Automatically allow media playback / EME permission requests */
-    webkit_permission_request_allow(request);
+
+    if (WEBKIT_IS_MEDIA_KEY_SYSTEM_PERMISSION_REQUEST(request)) {
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    /* Log the first few refusals: without a trace, a site that silently loses the
+     * camera looks like a Zephium bug. The cap stops a page from flooding the log
+     * by requesting a permission in a loop. */
+    if (g_denied_permissions < ZEPHIUM_PERMISSION_DENIAL_LOG_LIMIT) {
+        ++g_denied_permissions;
+        zephium_log("INFO", "PERMISSION_DENIED", "Denied permission request: %s",
+                    G_OBJECT_TYPE_NAME(request));
+    }
+    webkit_permission_request_deny(request);
+    return TRUE;
+}
+
+/* Escapes text for embedding in the diagnostic pages below. */
+static void html_escape(const char *in, char *out, size_t cap) {
+    size_t o = 0;
+    for (const char *p = in; p && *p && o + 6 < cap; ++p) {
+        switch (*p) {
+            case '&': memcpy(out + o, "&amp;", 5); o += 5; break;
+            case '<': memcpy(out + o, "&lt;", 4); o += 4; break;
+            case '>': memcpy(out + o, "&gt;", 4); o += 4; break;
+            case '"': memcpy(out + o, "&quot;", 6); o += 6; break;
+            default: out[o++] = *p; break;
+        }
+    }
+    out[o] = '\0';
+}
+
+/* A page asked for a new window (target="_blank", window.open). WebKit hands over
+ * the navigation action and expects the new view back; returning NULL cancels the
+ * popup. The target goes through the same allow-list as a typed address, so a page
+ * cannot use a popup to reach something the omnibox would refuse. */
+static GtkWidget *on_create_web_view(WebKitWebView *web_view, WebKitNavigationAction *action,
+                                     gpointer user_data) {
+    (void)web_view;
+    zephium_gtk_app_t *app = (zephium_gtk_app_t *)user_data;
+    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+
+    WebKitURIRequest *request = action ? webkit_navigation_action_get_request(action) : NULL;
+    const gchar *uri = request ? webkit_uri_request_get_uri(request) : NULL;
+    if (!uri || !*uri) {
+        zephium_log("WARN", "POPUP_BLOCKED", "Popup without a target URL was refused.");
+        return NULL;
+    }
+    if (!zephium_nav_is_allowed(uri, strlen(uri))) {
+        zephium_log("WARN", "POPUP_BLOCKED", "Blocked popup to %s",
+                    redacted_url(uri, safe_uri, sizeof(safe_uri)));
+        return NULL;
+    }
+
+    zephium_log("INFO", "POPUP_OPENED", "Opening popup in a new tab: %s",
+                redacted_url(uri, safe_uri, sizeof(safe_uri)));
+
+    /* The popup becomes one of our own tabs and loads the target itself, so the
+     * handler does not hand a view back to WebKit: returning NULL drops the
+     * request (WebKit would otherwise drive a view we did not create as a related
+     * view). */
+    (void)create_tab_view(app, uri, false);
+    return NULL;
+}
+
+/* A certificate error (expired, wrong host, self-signed, untrusted chain) aborts
+ * the load. There is deliberately no "continue anyway" path: the page is replaced
+ * with an explanation and the connection is dropped. */
+static gboolean on_load_failed_with_tls_errors(WebKitWebView *web_view, gchar *failing_uri,
+                                               GTlsCertificate *certificate,
+                                               GTlsCertificateFlags errors, gpointer user_data) {
+    (void)certificate;
+    (void)user_data;
+
+    char safe_uri[ZEPHIUM_MAX_URL_BYTES];
+    zephium_log("ERROR", "TLS_ERROR",
+                "Certificate rejected for %s (flags=0x%x); the page was not loaded.",
+                redacted_url(failing_uri, safe_uri, sizeof(safe_uri)), (unsigned int)errors);
+
+    char host[256] = "unknown host";
+    if (failing_uri && *failing_uri) {
+        GUri *parsed = g_uri_parse(failing_uri, G_URI_FLAGS_NONE, NULL);
+        if (parsed) {
+            const char *name = g_uri_get_host(parsed);
+            if (name && *name) (void)zephium_strcpy_safe(host, sizeof(host), name);
+            g_uri_unref(parsed);
+        }
+    }
+
+    char escaped_host[1024];
+    html_escape(host, escaped_host, sizeof(escaped_host));
+
+    char page[4096];
+    snprintf(page, sizeof(page),
+             "<html><head><meta charset='utf-8'></head>"
+             "<body style='background:#181818;color:#f0f0f0;font-family:sans-serif;padding:40px;line-height:1.6;'>"
+             "<h2>Insecure connection blocked</h2>"
+             "<p>Zephium did not load <b>%s</b> because its TLS certificate failed validation.</p>"
+             "<p>The connection was closed. There is no &quot;continue anyway&quot; option: a certificate "
+             "that cannot be verified may belong to an attacker on the same network.</p>"
+             "<p>Things worth checking: the system clock, a Wi-Fi captive portal that intercepts "
+             "traffic, or a proxy that replaces certificates.</p>"
+             "<p style='color:#888;font-size:13px;'>TLS flags: 0x%x</p>"
+             "</body></html>",
+             escaped_host, (unsigned int)errors);
+    webkit_web_view_load_html(web_view, page, "about:blank");
     return TRUE;
 }
 
@@ -620,6 +855,15 @@ static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool 
     g_signal_connect(view, "resource-load-started", G_CALLBACK(on_resource_load_started), NULL);
     g_signal_connect(view, "web-process-terminated", G_CALLBACK(on_web_process_terminated), NULL);
     g_signal_connect(view, "load-failed", G_CALLBACK(on_load_failed), NULL);
+    g_signal_connect(view, "create", G_CALLBACK(on_create_web_view), app);
+    g_signal_connect(view, "load-failed-with-tls-errors",
+                     G_CALLBACK(on_load_failed_with_tls_errors), app);
+
+    WebKitFindController *find_controller = webkit_web_view_get_find_controller(WEBKIT_WEB_VIEW(view));
+    if (find_controller) {
+        g_signal_connect(find_controller, "found-text", G_CALLBACK(on_find_found), NULL);
+        g_signal_connect(find_controller, "failed-to-find-text", G_CALLBACK(on_find_not_found), NULL);
+    }
 
     /* zephium_browser_init() already created the first tab. Reusing it keeps the
      * notebook page index and the core tab index in sync (they drifted by one
@@ -632,10 +876,7 @@ static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool 
             if (url && *url && zephium_browser_navigate(app->core, url)) {
                 /* the initial URL counts as a visit; make sure the load does not
                  * record the same URL a second time */
-                size_t len = strlen(tab->current_url);
-                if (len >= sizeof(g_last_history_uri)) len = sizeof(g_last_history_uri) - 1;
-                memcpy(g_last_history_uri, tab->current_url, len);
-                g_last_history_uri[len] = '\0';
+                (void)zephium_strcpy_safe(g_last_history_uri, sizeof(g_last_history_uri), tab->current_url);
             }
         }
     } else {
@@ -657,6 +898,104 @@ static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool 
     update_active_tab_ui(app);
 
     return view;
+}
+
+/* ---------------------------------------------------------------------------
+ * Find in page (Ctrl+F)
+ *
+ * The strip is hidden by default and drives the active tab's
+ * WebKitFindController. The search restarts on every edit (incremental), Enter
+ * goes forward and Shift+Enter backward, Escape closes the strip and clears the
+ * highlight.
+ * ------------------------------------------------------------------------- */
+#define ZEPHIUM_FIND_MAX_MATCHES 1000
+
+static void find_finish(void) {
+    WebKitWebView *view = get_active_web_view(&g_app);
+    if (!view) return;
+    WebKitFindController *controller = webkit_web_view_get_find_controller(view);
+    if (controller) webkit_find_controller_search_finish(controller);
+}
+
+static void find_search(bool forward, bool restart) {
+    WebKitWebView *view = get_active_web_view(&g_app);
+    if (!view || !g_app.find_entry) return;
+    WebKitFindController *controller = webkit_web_view_get_find_controller(view);
+    if (!controller) return;
+
+    const char *text = gtk_entry_get_text(GTK_ENTRY(g_app.find_entry));
+    if (!text || !*text) {
+        webkit_find_controller_search_finish(controller);
+        if (g_app.lbl_find) gtk_label_set_text(GTK_LABEL(g_app.lbl_find), "");
+        return;
+    }
+
+    if (restart) {
+        webkit_find_controller_search(controller, text,
+                                      WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE | WEBKIT_FIND_OPTIONS_WRAP_AROUND,
+                                      ZEPHIUM_FIND_MAX_MATCHES);
+    } else if (forward) {
+        webkit_find_controller_search_next(controller);
+    } else {
+        webkit_find_controller_search_previous(controller);
+    }
+}
+
+static void on_find_found(WebKitFindController *controller, guint match_count, gpointer user_data) {
+    (void)controller;
+    (void)user_data;
+    if (!g_app.lbl_find) return;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%u match%s", match_count, match_count == 1 ? "" : "es");
+    gtk_label_set_text(GTK_LABEL(g_app.lbl_find), buf);
+}
+
+static void on_find_not_found(WebKitFindController *controller, gpointer user_data) {
+    (void)controller;
+    (void)user_data;
+    if (g_app.lbl_find) gtk_label_set_text(GTK_LABEL(g_app.lbl_find), "No matches");
+}
+
+static void on_find_changed(GtkEditable *editable, gpointer user_data) {
+    (void)editable;
+    (void)user_data;
+    find_search(true, true);
+}
+
+static void on_find_next_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    find_search(true, false);
+}
+
+static void on_find_prev_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    find_search(false, false);
+}
+
+static void on_find_close(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    find_finish();
+    if (g_app.find_bar) gtk_widget_hide(g_app.find_bar);
+    WebKitWebView *view = get_active_web_view(&g_app);
+    if (view) gtk_widget_grab_focus(GTK_WIDGET(view));
+}
+
+static gboolean on_find_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
+    (void)widget;
+    (void)user_data;
+    if (event->keyval == GDK_KEY_Escape) {
+        on_find_close(NULL, NULL);
+        return TRUE;
+    }
+    if (event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) {
+        bool backward = (event->state & GDK_SHIFT_MASK) != 0;
+        find_search(!backward, false);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static void on_omnibox_activate(GtkEntry *entry, gpointer user_data) {
@@ -764,6 +1103,13 @@ static gboolean on_key_press_event(GtkWidget *widget, GdkEventKey *event, gpoint
         } else if (event->keyval == GDK_KEY_l || event->keyval == GDK_KEY_L) {
             gtk_widget_grab_focus(app->entry_url);
             return TRUE;
+        } else if (event->keyval == GDK_KEY_f || event->keyval == GDK_KEY_F) {
+            if (app->find_bar) {
+                gtk_widget_show(app->find_bar);
+                gtk_widget_grab_focus(app->find_entry);
+                gtk_editable_select_region(GTK_EDITABLE(app->find_entry), 0, -1);
+            }
+            return TRUE;
         }
     } else if (event->keyval == GDK_KEY_F5) {
         on_reload_clicked(NULL, app);
@@ -837,8 +1183,185 @@ static gboolean take_screenshot(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+/* ---------------------------------------------------------------------------
+ * Downloads
+ *
+ * WebKit reports a download on the WebKitWebContext ("download-started") and then
+ * asks where to put it ("decide-destination", which carries the server-suggested
+ * name). The shell keeps every file inside the user's Downloads directory, never
+ * uses the suggested name verbatim (no path separators, no leading dots), mirrors
+ * the transfer into the store, and never auto-opens the result.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    char id[32];
+    int64_t total_bytes;
+    gint64 last_update_us;
+} download_tracker_t;
+
+static unsigned g_download_seq = 0;
+
+static const char *downloads_directory(void) {
+    static char *dir = NULL;
+    if (dir) return dir;
+
+    const char *special = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+    if (special && *special) {
+        dir = g_strdup(special);
+    } else {
+        dir = g_build_filename(g_get_home_dir(), "Downloads", NULL);
+    }
+    if (g_mkdir_with_parents(dir, 0700) != 0) {
+        zephium_log("WARN", "DOWNLOAD_DIR", "No writable Downloads directory; download cancelled.");
+        g_free(dir);
+        dir = NULL;
+    }
+    return dir;
+}
+
+static void sanitize_download_name(const char *suggested, char *out, size_t cap) {
+    const char *base = suggested ? suggested : "";
+
+    /* Only the last path component may survive, whatever the server sent. */
+    const char *slash = strrchr(base, '/');
+    if (slash) base = slash + 1;
+    const char *backslash = strrchr(base, '\\');
+    if (backslash) base = backslash + 1;
+
+    size_t o = 0;
+    for (const char *p = base; *p && o + 1 < cap; ++p) {
+        unsigned char c = (unsigned char)*p;
+        out[o++] = (c == '/' || c == '\\' || c == ':' || c < 0x20) ? '_' : (char)c;
+    }
+    out[o] = '\0';
+
+    while (out[0] == '.') memmove(out, out + 1, strlen(out)); /* no leading dots */
+    if (out[0] == '\0') (void)zephium_strcpy_safe(out, cap, "download");
+}
+
+static char *unique_download_path(const char *dir, const char *name) {
+    char *path = g_build_filename(dir, name, NULL);
+    if (!g_file_test(path, G_FILE_TEST_EXISTS)) return path;
+
+    for (unsigned n = 1; n < 1000; ++n) {
+        char candidate[600];
+        snprintf(candidate, sizeof(candidate), "%.400s (%u)", name, n);
+        g_free(path);
+        path = g_build_filename(dir, candidate, NULL);
+        if (!g_file_test(path, G_FILE_TEST_EXISTS)) return path;
+    }
+    return path;
+}
+
+static download_tracker_t *download_tracker(WebKitDownload *download) {
+    return (download_tracker_t *)g_object_get_data(G_OBJECT(download), "zephium-download");
+}
+
+static void on_download_received(WebKitDownload *download, guint64 data_length, gpointer user_data) {
+    (void)user_data;
+    download_tracker_t *tracker = download_tracker(download);
+    if (!tracker || !g_app.core || !g_app.core->store) return;
+
+    /* "received-data" fires per chunk; the store is a synchronous SQLite commit, so
+     * progress is written at most twice a second. */
+    gint64 now = g_get_monotonic_time();
+    if (tracker->last_update_us != 0 && now - tracker->last_update_us < 500000) return;
+    tracker->last_update_us = now;
+
+    (void)zephium_store_update_download_progress(g_app.core->store, tracker->id,
+                                                 (int64_t)data_length, tracker->total_bytes);
+}
+
+static void on_download_finished(WebKitDownload *download, gpointer user_data) {
+    (void)user_data;
+    download_tracker_t *tracker = download_tracker(download);
+    guint64 received = webkit_download_get_received_data_length(download);
+
+    if (tracker && g_app.core && g_app.core->store) {
+        int64_t total = tracker->total_bytes > 0 ? tracker->total_bytes : (int64_t)received;
+        (void)zephium_store_update_download_progress(g_app.core->store, tracker->id,
+                                                     (int64_t)received, total);
+        (void)zephium_store_update_download(g_app.core->store, tracker->id, (int64_t)received,
+                                            ZEPHIUM_DOWNLOAD_COMPLETED);
+    }
+    zephium_log("INFO", "DOWNLOAD_FINISHED", "%llu bytes", (unsigned long long)received);
+}
+
+static void on_download_failed(WebKitDownload *download, GError *error, gpointer user_data) {
+    (void)user_data;
+    download_tracker_t *tracker = download_tracker(download);
+    if (tracker && g_app.core && g_app.core->store) {
+        guint64 received = webkit_download_get_received_data_length(download);
+        (void)zephium_store_update_download_progress(g_app.core->store, tracker->id,
+                                                     (int64_t)received, tracker->total_bytes);
+        (void)zephium_store_update_download(g_app.core->store, tracker->id, (int64_t)received,
+                                            ZEPHIUM_DOWNLOAD_FAILED);
+    }
+    zephium_log("ERROR", "DOWNLOAD_FAILED", "%s", error ? error->message : "unknown error");
+}
+
+/* WebKit asks for the destination after the response arrived; suggested_filename is
+ * what the server asked for (Content-Disposition) or the last URL component. It is
+ * sanitised first, then placed in the Downloads directory. */
+static gboolean on_download_decide_destination(WebKitDownload *download, gchar *suggested_filename,
+                                               gpointer user_data) {
+    (void)user_data;
+    download_tracker_t *tracker = download_tracker(download);
+
+    char name[512];
+    sanitize_download_name(suggested_filename, name, sizeof(name));
+
+    const char *dir = downloads_directory();
+    if (!dir) {
+        webkit_download_cancel(download);
+        return TRUE;
+    }
+
+    char *path = unique_download_path(dir, name);
+    if (!path) {
+        webkit_download_cancel(download);
+        return TRUE;
+    }
+    webkit_download_set_destination(download, path);
+
+    if (tracker && g_app.core && g_app.core->store) {
+        WebKitURIRequest *request = webkit_download_get_request(download);
+        const gchar *uri = request ? webkit_uri_request_get_uri(request) : "";
+        if (!zephium_store_record_download(g_app.core->store, tracker->id, uri, path,
+                                           tracker->total_bytes)) {
+            zephium_log("WARN", "DOWNLOAD_STORE", "Could not record the download in the store.");
+        }
+    }
+
+    /* The filename only: the log must not contain the user's home directory. */
+    zephium_log("INFO", "DOWNLOAD_STARTED", "Saving %s", name);
+    g_free(path);
+    return TRUE;
+}
+
+static void on_download_started(WebKitWebContext *context, WebKitDownload *download, gpointer user_data) {
+    (void)context;
+    (void)user_data;
+
+    if (!g_app.core || !g_app.core->store) {
+        webkit_download_cancel(download);
+        return;
+    }
+
+    WebKitURIResponse *response = webkit_download_get_response(download);
+    download_tracker_t *tracker = g_new0(download_tracker_t, 1);
+    snprintf(tracker->id, sizeof(tracker->id), "dl-%u", ++g_download_seq);
+    tracker->total_bytes = response ? (int64_t)webkit_uri_response_get_content_length(response) : 0;
+    g_object_set_data_full(G_OBJECT(download), "zephium-download", tracker, g_free);
+
+    g_signal_connect(download, "decide-destination", G_CALLBACK(on_download_decide_destination), NULL);
+    g_signal_connect(download, "received-data", G_CALLBACK(on_download_received), NULL);
+    g_signal_connect(download, "finished", G_CALLBACK(on_download_finished), NULL);
+    g_signal_connect(download, "failed", G_CALLBACK(on_download_failed), NULL);
+}
+
 static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool disable_gpu,
-                           bool is_wsl, const char *screenshot_path, int screenshot_delay) {
+                           bool is_wsl, const char *screenshot_path, int screenshot_delay,
+                           bool no_adblock) {
     gtk_init(&argc, &argv);
 
     memset(&g_app, 0, sizeof(g_app));
@@ -854,11 +1377,25 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     }
 
     WebKitWebContext *web_context = webkit_web_context_get_default();
-    if (is_wsl) {
-        /* Crucial: disable WebKit bubblewrap sandbox in WSL to prevent bwrap permission crashes */
+    /* The WebKit sandbox is a security boundary and stays enabled. It used to be
+     * turned off whenever WSL was detected, which removed the process isolation
+     * from every page for the whole session; the opt-out is now explicit. */
+    if (zephium_sandbox_disabled()) {
         webkit_web_context_set_sandbox_enabled(web_context, FALSE);
+        zephium_log("WARN", "SANDBOX",
+                    "WebKit sandbox DISABLED (ZEPHIUM_NO_SANDBOX=1): web content runs with the "
+                    "full privileges of your user account. Unset ZEPHIUM_NO_SANDBOX to restore "
+                    "the sandbox.");
+    } else {
+        webkit_web_context_set_sandbox_enabled(web_context, TRUE);
     }
     webkit_web_context_set_cache_model(web_context, WEBKIT_CACHE_MODEL_WEB_BROWSER);
+
+    /* Start compiling the blocker rules before the first page loads; the filter
+     * arrives asynchronously and is attached to the tab created further down. */
+    adblock_init(no_adblock);
+
+    g_signal_connect(web_context, "download-started", G_CALLBACK(on_download_started), &g_app);
 
     g_app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_default_size(GTK_WINDOW(g_app.window), 1280, 800);
@@ -903,6 +1440,35 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     g_signal_connect(btn_zoom_in, "clicked", G_CALLBACK(on_zoom_in_clicked), &g_app);
     gtk_box_pack_start(GTK_BOX(toolbar), btn_zoom_in, FALSE, FALSE, 1);
 
+    /* Find-in-page strip: built hidden and excluded from gtk_widget_show_all(),
+     * so Ctrl+F is the only way it appears. */
+    g_app.find_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    g_app.find_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(g_app.find_entry), "Find in page");
+    g_signal_connect(g_app.find_entry, "changed", G_CALLBACK(on_find_changed), &g_app);
+    g_signal_connect(g_app.find_entry, "key-press-event", G_CALLBACK(on_find_key_press), &g_app);
+    gtk_box_pack_start(GTK_BOX(g_app.find_bar), g_app.find_entry, TRUE, TRUE, 2);
+
+    g_app.lbl_find = gtk_label_new("");
+    gtk_box_pack_start(GTK_BOX(g_app.find_bar), g_app.lbl_find, FALSE, FALSE, 4);
+
+    GtkWidget *btn_find_prev = gtk_button_new_with_label("<");
+    g_signal_connect(btn_find_prev, "clicked", G_CALLBACK(on_find_prev_clicked), &g_app);
+    gtk_box_pack_start(GTK_BOX(g_app.find_bar), btn_find_prev, FALSE, FALSE, 1);
+
+    GtkWidget *btn_find_next = gtk_button_new_with_label(">");
+    g_signal_connect(btn_find_next, "clicked", G_CALLBACK(on_find_next_clicked), &g_app);
+    gtk_box_pack_start(GTK_BOX(g_app.find_bar), btn_find_next, FALSE, FALSE, 1);
+
+    GtkWidget *btn_find_close = gtk_button_new_with_label("x");
+    g_signal_connect(btn_find_close, "clicked", G_CALLBACK(on_find_close), &g_app);
+    gtk_box_pack_start(GTK_BOX(g_app.find_bar), btn_find_close, FALSE, FALSE, 1);
+
+    gtk_box_pack_start(GTK_BOX(vbox), g_app.find_bar, FALSE, FALSE, 0);
+    gtk_widget_show_all(g_app.find_bar);
+    gtk_widget_hide(g_app.find_bar);
+    gtk_widget_set_no_show_all(g_app.find_bar, TRUE);
+
     /* Notebook for multi-tab support */
     g_app.notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(vbox), g_app.notebook, TRUE, TRUE, 0);
@@ -941,6 +1507,7 @@ static void print_usage(const char *prog) {
     printf("  --wayland           Force GDK Wayland display backend\n");
     printf("  --screenshot <file> Save a PNG of the rendered page and exit\n");
     printf("  --screenshot-delay  Seconds to wait before the screenshot (default 8)\n");
+    printf("  --no-adblock        Disable the content filter (same as ZEPHIUM_ADBLOCK=0)\n");
 }
 
 static int run_cli_browser(const char *initial_url) {
@@ -1069,6 +1636,7 @@ int main(int argc, char **argv) {
     bool disable_gpu = false;
     bool force_x11 = false;
     bool force_wayland = false;
+    bool no_adblock = false;
     const char *screenshot_path = NULL;
     int screenshot_delay = 8;
 
@@ -1094,6 +1662,8 @@ int main(int argc, char **argv) {
             force_x11 = true;
         } else if (strcmp(argv[i], "--wayland") == 0) {
             force_wayland = true;
+        } else if (strcmp(argv[i], "--no-adblock") == 0) {
+            no_adblock = true;
         } else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             screenshot_path = argv[++i];
         } else if (strcmp(argv[i], "--screenshot-delay") == 0 && i + 1 < argc) {
@@ -1113,7 +1683,7 @@ int main(int argc, char **argv) {
 #if defined(__linux__) && defined(ZEPHIUM_ENABLE_WEBKITGTK)
     if (!headless && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))) {
         return run_gtk_browser(argc, argv, initial_url, disable_gpu, on_wsl,
-                               screenshot_path, screenshot_delay);
+                               screenshot_path, screenshot_delay, no_adblock);
     }
 #endif
 
@@ -1121,5 +1691,6 @@ int main(int argc, char **argv) {
     (void)on_wsl;
     (void)screenshot_path;
     (void)screenshot_delay;
+    (void)no_adblock;
     return run_cli_browser(initial_url);
 }

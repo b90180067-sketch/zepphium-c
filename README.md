@@ -27,30 +27,67 @@ reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A
 ```
 
 ```powershell
-cd C:\Users\zephium-c\windows
+cd C:\path\to\zephium-c\windows
 
-.\zephium_win.exe                                      # mở duckduckgo
+.\zephium_win.exe                                      # mở tab mới (ASCII start page)
 .\zephium_win.exe https://grokipedia.com               # mở URL
 .\zephium_win.exe --tab-sleep 10 https://youtube.com   # tab ngủ đông sau 10 phút
 .\zephium_win.exe --tab-sleep 0 https://example.com    # tắt ngủ đông
 ```
 
-- `WebView2Loader.dll` phải nằm cạnh exe (đã có sẵn trong repo).
+- `WebView2Loader.dll` phải nằm cạnh exe; lấy `zephium_win.exe` + `WebView2Loader.dll`
+  từ mục **Releases** của repo (xem *Binaries* trong §4), hoặc tự build từ source.
 - Exe chưa ký số → SmartScreen có thể hỏi: *More info → Run anyway*.
 - Phím tắt: `Ctrl+T` tab mới · `Ctrl+W` đóng tab · `Ctrl+Tab`/`Ctrl+Shift+Tab` chuyển tab ·
   `Ctrl+L` focus ô địa chỉ · `F5` tải lại · `Ctrl++`/`Ctrl+-` zoom.
 - Log chẩn đoán: `windows\zephium_win.log` (dòng `tab N hibernated`, `tab N waking`, `navigate …`).
 - Build lại từ source:
   ```powershell
-  cd C:\Users\zephium-c\windows
+  cd C:\path\to\zephium-c\windows
   powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
-  mingw32-make
+  mingw32-make                                             # build exe + copy newtab/
   ```
+
+### Màn hình tab mới (ASCII start page)
+
+![Zephium new tab](newtab/preview.png)
+
+Cùng bộ chrome tối khi đang duyệt một trang thật (YouTube):
+
+![Zephium dark chrome while browsing](newtab/preview-browsing.png)
+
+`Ctrl+T` — và lần khởi động không truyền URL — mở một start page full-bleed:
+hình nền ASCII động, omnibox ở giữa màn hình, 6 shortcut, đồng hồ và 3 cảnh
+(Vịnh trăng / Bình minh / Cực quang).
+
+- **Core là C17**: toàn bộ địa hình, mặt nước, sao, mặt trăng và cực quang được
+  sinh trong `newtab/ascii_core.c`, biên dịch freestanding sang WebAssembly
+  (`newtab/ascii_core.wasm`, ~20 KB, không import). JavaScript chỉ đọc buffer
+  `uint16_t` và vẽ glyph màu lên canvas.
+- **Dựa trên bộ ascii.rest**: dùng font Paper Mono và ngôn ngữ hình ảnh ASCII của
+  file zip; các đỉnh núi được "vẽ" thủ công (vị trí/độ cao/độ dốc), không phải
+  noise ngẫu nhiên.
+- **Tích hợp shell**: WebView2 map host `newtab.zephium` vào thư mục
+  `newtab/`; khi start page active, hàng toolbar Win32 được ẩn để nội dung
+  full-bleed. Toàn bộ chrome — title bar (DWM), tab strip và toolbar — luôn dùng
+  tông tối với accent mint, kể cả khi tab đang mở YouTube hay một trang sáng;
+  các nút back/forward/reload/zoom và ô địa chỉ được owner-draw để không còn
+  mảng trắng Win32 cũ. Omnibox gửi `navigate|<input>` về shell, shell phân loại
+  URL/search bằng core C17 `navigation` rồi điều hướng tab.
+- **Build core**:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File newtab\build.ps1
+  ```
+  Cần clang có target `wasm32`, Node và gcc; không cần npm. Chi tiết:
+  [`newtab/README.md`](newtab/README.md).
+- Nếu `zephium_win.exe` đang chạy, Windows khoá file exe: đóng cửa sổ đó rồi
+  `mingw32-make` lại (không còn bản binary "dùng ngay" nào trong repo — xem
+  *Binaries* trong §4).
 
 ### WSL (WebKitGTK)
 
 ```bash
-cd /mnt/c/Users/zephium-c
+cd /mnt/c/path/to/zephium-c
 chmod +x setup_wsl.sh run_wsl.sh
 ./setup_wsl.sh                        # 1 lần: WebKitGTK, GStreamer, fonts
 ./run_wsl.sh https://duckduckgo.com   # tự build bằng CMake rồi chạy
@@ -64,6 +101,38 @@ Các cờ hữu ích:
 | `--disable-gpu` | chỉ dùng GL phần mềm (llvmpipe) |
 | `--screenshot <file> --screenshot-delay N` | chụp ảnh trang đang render rồi thoát |
 | `--headless` | REPL/CLI khi không có màn hình |
+| `--no-adblock` | tắt bộ lọc quảng cáo cho phiên chạy này |
+
+**Ad blocking**: bộ lọc quảng cáo (doubleclick, google-analytics, facebook/tr) **bật mặc
+định**. Rule được sinh bởi module C17 `blocker`, biên dịch bất đồng bộ bằng
+`WebKitUserContentFilterStore` rồi gắn vào user-content-manager của **mọi tab**; log ghi
+`[ADBLOCK] Content filter active.`. Nếu WebKit không biên dịch được filter, browser chỉ ghi
+`[WARN] [ADBLOCK_FAILED] ...` và tiếp tục duyệt web không có filter. Tắt bằng cờ hoặc biến
+môi trường:
+
+```bash
+ZEPHIUM_ADBLOCK=0 ./run_wsl.sh https://duckduckgo.com
+./run_wsl.sh --no-adblock https://duckduckgo.com
+```
+
+**Sandbox WebKit**: sandbox WebProcess (bubblewrap) **bật mặc định**, kể cả trên WSL.
+Chỉ tắt khi kernel WSL2 không cấp được unprivileged user namespace (WebKit không khởi
+động, log có lỗi `bwrap`):
+
+```bash
+ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh https://duckduckgo.com
+```
+
+Khi tắt, browser in cảnh báo `[WARN] [SANDBOX] WebKit sandbox DISABLED (...)` — trang web
+chạy với toàn bộ quyền của user, nên chỉ dùng khi thật cần. `run_wsl.sh` không còn export
+`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS`; `ZEPHIUM_NO_SANDBOX=1` là công tắc duy nhất.
+
+**Popup, tải file, tìm trong trang**: `target="_blank"`/`window.open` mở thành **tab mới**
+(URL vẫn phải qua allow-list như ô địa chỉ). File tải về nằm trong thư mục **Downloads** của
+user với tên đã làm sạch (chỉ lấy phần cuối, bỏ dấu phân cách đường dẫn và dấu chấm ở đầu) và
+được ghi vào bảng `downloads` (state 0 → 1). `Ctrl+F` mở thanh tìm trong trang: gõ để tìm,
+`Enter`/`Shift+Enter` tiến/lùi, `Esc` đóng. Lỗi chứng chỉ TLS **chặn** trang và hiện trang
+"Insecure connection blocked" — không có tuỳ chọn bỏ qua chứng chỉ.
 
 Kiểm tra sau khi chạy: `python3 read_log.py` (các mục `[RENDER]`, `[MEDIA]`, `[PAGE]`).
 Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zephium --headless` (REPL).
@@ -77,6 +146,8 @@ Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zeph
 | WSL: cửa sổ trắng / site không hiện UI | `./run_wsl.sh --screenshot /tmp/page.png --screenshot-delay 20 <url>` rồi xem `python3 read_log.py` |
 | WSL: video YouTube không phát | Không tắt compositing/DMABUF (bản này đã xử lý); xem mục *Sự cố đã biết* bên dưới |
 | WSL chậm, tụt FPS | Kiểm tra `ls /dev/dri`: không có `renderD128` thì đang render bằng CPU — xem mục **Hiệu năng** |
+| WSL: WebKit không khởi động, log có lỗi `bwrap` / sandbox | Kernel thiếu unprivileged user namespace: chạy `ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh <url>` (sandbox tắt, có cảnh báo `[SANDBOX]`) |
+| Adblock không chặn (log có `[ADBLOCK_FAILED]`) | Xem thông báo lỗi ngay sau đó; tắt hẳn bằng `ZEPHIUM_ADBLOCK=0` nếu filter làm chậm trang |
 
 ---
 
@@ -89,22 +160,28 @@ zephium-c/
 ├── geometry/           # Point, Size, Rect tính toán giao diện
 ├── ids/                # 128-bit ULID Crockford-32 định danh Tabs/Windows
 ├── navigation/         # URL Classification, Search fallback, SSRF & Local host protection
-├── store/              # SQLite3 WAL store (Bookmarks, History, Downloads, Preferences)
+├── store/              # SQLite3 WAL store (Bookmarks, History, Downloads, Preferences;
+│                       #   API liệt kê/tìm kiếm + tiến độ tải, xem store/port.h)
 ├── zoom/               # Điều khiển zoom cấp số nhân rời rạc
+├── newtab/             # Start page: ASCII wallpaper (C17 → wasm) + omnibox giữa màn hình
+│   ├── ascii_core.c    #   core C17 sinh cảnh ASCII (không libc)
+│   ├── build.ps1       #   build wasm + base64 fallback + demo terminal
+│   ├── index.html      #   markup, icon sprite
+│   ├── newtab.css/js   #   giao diện, canvas, omnibox, clock, scene switch
+│   └── fonts/          #   Paper Mono (OFL) từ bộ ascii.rest
 ├── windows/            # Shell native Windows (Win32 + WebView2): multi-tab, tab ngủ đông
 │   ├── zephium_win.cpp #   host window + toolbar + tab strip (C++17, COM)
 │   ├── Makefile        #   build bằng mingw32-make
 │   ├── fetch_sdk.ps1   #   tải WebView2 SDK vào windows/sdk (không commit)
-│   ├── zephium_win.exe #   binary prebuilt
-│   └── WebView2Loader.dll
+│   └── (zephium_win.exe, WebView2Loader.dll: build output, tải từ Releases)
 ├── main.c              # Entry point: Linux WebKitGTK 4.1 Shell + Cross-platform CLI REPL
 ├── read_log.py         # Đọc/chẩn đoán log WebKit + GStreamer + lỗi JS của trang
 ├── CMakeLists.txt      # Cấu hình build đa nền tảng (CMake 3.16+)
 ├── Makefile            # Makefile cho MinGW / GCC / Clang
 ├── setup_wsl.sh        # Script tự động cài dependencies trên WSL
 ├── run_wsl.sh          # Script tối ưu chạy trên WSLg
-├── zephium_gcc.exe     # Binary CLI prebuilt (GCC 14+)
-└── zephium_clang.exe   # Binary CLI prebuilt (Clang 19+)
+├── zephium_gcc.exe     # CLI binary - KHÔNG commit, tải từ GitHub Releases
+└── zephium_clang.exe   # CLI binary - KHÔNG commit, tải từ GitHub Releases
 ```
 
 ---
@@ -115,7 +192,7 @@ zephium-c/
 
 Đường dẫn thư mục này từ trong WSL:
 ```bash
-cd /mnt/c/Users/zephium-c
+cd /mnt/c/path/to/zephium-c
 ```
 
 ### Bước 1: Cài đặt dependencies (chạy 1 lần duy nhất)
@@ -146,6 +223,11 @@ chmod +x setup_wsl.sh run_wsl.sh
 - **Chế độ Headless / CLI REPL (khi kết nối qua SSH hoặc terminal thuần)**:
   ```bash
   ./build/zephium --headless
+  ```
+- **Tắt sandbox WebKit** (mặc định **bật**; chỉ dùng khi kernel WSL2 không hỗ trợ
+  unprivileged user namespace):
+  ```bash
+  ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh https://duckduckgo.com
   ```
 
 ### Sự cố đã biết: video YouTube không phát được trên WSLg
@@ -218,11 +300,39 @@ script chuyển về UI process và ghi vào log dưới dạng `[WARN] [PAGE_JS
 và 200 message/phiên để không ảnh hưởng hiệu năng; tài nguyên tải lỗi (ảnh/script 404) không bị
 ghi vì không phải exception.
 
+### Dữ liệu nhạy cảm: log, history, quyền file
+
+- `zephium_debug.log` được mở với `umask 077` (**mode 0600**); `/tmp/zephium-cache` và
+  `/tmp/zephium-data` (cookie, localStorage, HTTP cache) tạo với **mode 0700** — kể cả khi
+  thư mục đã tồn tại từ bản cũ.
+- Mọi URL ghi vào log (`RESOURCE_FAILED`, `RESOURCE_CANCELLED`, `REQUEST_START`,
+  `MEDIA_CHUNK_LOADED`, `PAGE_LOAD_FAILED`, thông báo chặn điều hướng) đều đi qua
+  `zephium_nav_redact_url()`: **query string và fragment bị cắt** trước khi ghi, nên token
+  phiên, tham số CDN đã ký và từ khoá tìm kiếm không nằm trong file log.
+- Bảng `history` của `zephium_profile.db` lưu URL **đã cắt query/fragment**; tab vẫn giữ
+  URL đầy đủ để reload. Hệ quả: mở lại một mục history sẽ không kèm tham số ban đầu.
+- `PAGE_JS_ERROR` chỉ ghi **200 ký tự đầu** của thông báo lỗi (phần còn lại thường chứa
+  URL đầy đủ hoặc giá trị form).
+- `zephium_profile.db` cùng `-wal`/`-shm` tạo với **mode 0600** trên Linux. Trên Windows,
+  shell đặt DACL cho `zephium_win.log` và profile: chỉ SYSTEM và user hiện tại.
+
 ---
 
 ## 4. Kiểm thử trên Windows (MinGW-w64)
 
-### Chạy binary có sẵn:
+### Binaries: GitHub Releases, không commit vào git
+
+Không còn file binary nào trong git: `.gitignore` bỏ qua `*.exe` và `*.dll`. Các artifact
+được phát hành qua **GitHub Releases** — tải release khớp với tag bạn cần rồi đặt file vào
+đúng chỗ:
+
+| Artifact | Vị trí khi chạy |
+|---|---|
+| `zephium_gcc.exe`, `zephium_clang.exe` | gốc repo (CLI `--headless`/`--batch`) |
+| `zephium_win.exe`, `WebView2Loader.dll` | cạnh nhau trong `windows\` (shell WebView2) |
+
+Build từ source cho ra đúng những binary đó (xem §0 và §5).
+
 ```powershell
 .\zephium_gcc.exe --headless
 # hoặc
@@ -238,6 +348,35 @@ ghi vì không phải exception.
 ```powershell
 mingw32-make gate
 ```
+
+Các gate dùng CMake cho phần chính, còn từng unit (`zoom`, `geometry`, `ids`,
+`navigation`, `blocker`, `store`, `browser_core`) có Makefile riêng. Không có đường dẫn
+toolchain nào bị hard-code: mặc định là `gcc`/`clang` trên `PATH` và SQLite3 qua
+`pkg-config`. Nếu toolchain/SQLite3 nằm ở prefix riêng, tạo `Makefile.local` ở thư mục gốc
+repo (đã nằm trong `.gitignore`, không bao giờ commit):
+
+```make
+CC_GCC = C:/deps/mingw64/bin/gcc.exe
+CC_CLANG = C:/deps/mingw64/bin/clang.exe
+GCC = C:/deps/mingw64/bin/gcc.exe
+GXX = C:/deps/mingw64/bin/g++.exe
+SQLITE_CFLAGS = -IC:/deps/sqlite/include
+SQLITE_LIBS = C:/deps/sqlite/lib/libsqlite3.a
+```
+
+Hoặc truyền trực tiếp: `mingw32-make CC_GCC=gcc SQLITE_LIBS=-lsqlite3 gate`.
+
+Binary được build với `-ffile-prefix-map`, nên không nhúng đường dẫn tuyệt đối của máy
+build (kiểm tra: `strings build/zephium | grep -i <tên-user>` phải không ra kết quả).
+
+### CI (Ubuntu)
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) chạy trên `ubuntu-latest`: cài
+`libsqlite3-dev`, build 7 module portable với `-Werror` rồi replay toàn bộ `cases.jsonl` của
+từng module qua `harness/diff_runner.c` (zoom, geometry, ids, navigation, blocker, store,
+browser_core). Không cần GUI, CMake hay MinGW — chạy lại trên Ubuntu/WSL bằng khối lệnh
+"Build modules and run harnesses" trong workflow (chỉ cần `sudo apt-get install -y
+libsqlite3-dev` trước đó).
 
 ---
 
@@ -261,5 +400,22 @@ active hoặc đang phát audio thì không bao giờ bị ngủ. Đo trên 4 ta
 
 Chi tiết (yêu cầu, kiến trúc, phím tắt, giới hạn): [windows/README.md](windows/README.md).
 
-Nhanh gọn: `zephium_win.exe` + `WebView2Loader.dll` đã build sẵn trong `windows/`,
-chỉ cần máy có Microsoft Edge WebView2 Runtime (Windows 11 mặc định có).
+**Popup, tải file, quyền**: `target="_blank"`/`window.open` mở thành tab mới (URL vẫn phải
+qua `zephium_nav_is_allowed`, giống ô địa chỉ); file tải về thư mục **Downloads** của user
+với tên đã làm sạch và được ghi vào bảng `downloads`; mọi permission (camera, micro, vị trí,
+thông báo, clipboard, …) bị **từ chối mặc định**, chỉ **autoplay** (phát media) được cho phép.
+
+> Các handler này mới được **biên dịch**, chưa chạy thử trên Windows trong môi trường phát
+> triển hiện tại — xem ghi chú *Chưa xác minh* ở cuối mục.
+
+Nhanh gọn: tải `zephium_win.exe` + `WebView2Loader.dll` từ mục **Releases** (hoặc build bằng
+`mingw32-make` trong `windows/`), chỉ cần máy có Microsoft Edge WebView2 Runtime
+(Windows 11 mặc định có).
+
+### Chưa xác minh (Windows shell)
+
+Trong môi trường phát triển hiện tại chỉ **compile** được shell Windows: chạy nó cần desktop
++ WebView2, và các handler ở trên cần thao tác người dùng (click popup, tải file, prompt
+quyền). Vì vậy **chưa có bằng chứng runtime** cho: popup mở tab + kiểm tra allow-list, tên
+file tải về + bản ghi trong bảng `downloads`, và việc từ chối permission. Phần Linux/WSL
+(§2, §3) thì đã được chạy và chụp ảnh kiểm chứng.

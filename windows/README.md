@@ -19,13 +19,21 @@ windows/
 - Windows 10/11 x64, đã có **Microsoft Edge WebView2 Runtime**
   (Windows 11 có sẵn; Windows 10 cài từ https://developer.microsoft.com/microsoft-edge/webview2/).
   Kiểm tra: `reg query "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"`
-- MinGW-w64 tại `C:/mingw64` với `gcc`, `g++`, `mingw32-make` và SQLite3 tĩnh ở
-  `C:/mingw64/opt/lib/libsqlite3.a` (đúng layout mà `Makefile` gốc của project đang dùng).
+- MinGW-w64 (`gcc`, `g++`, `mingw32-make`) và SQLite3 (header + thư viện tĩnh), đều
+  nằm trong search path mặc định của toolchain. Nếu chúng ở prefix riêng, khai báo trong
+  `Makefile.local` ở thư mục gốc repo (file này không được commit) hoặc truyền biến cho make:
+
+  ```powershell
+  mingw32-make SQLITE_CFLAGS="-IC:\deps\sqlite\include" `
+               SQLITE_LIBS="C:\deps\sqlite\lib\libsqlite3.a"
+  ```
+
+  Cùng cách đó để trỏ tới toolchain khác: `mingw32-make GCC="D:\x\gcc.exe" GXX="D:\x\g++.exe"`.
 
 ## Build
 
 ```powershell
-cd C:\Users\offli\zephium-c\windows
+cd C:\path\to\zephium-c\windows
 powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # chỉ lần đầu
 mingw32-make
 ```

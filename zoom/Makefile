@@ -1,10 +1,20 @@
 SHELL = cmd.exe
 
-CC_GCC = C:/mingw64/bin/gcc.exe
-CC_CLANG = C:/msys64/clang64/bin/clang.exe
+# Optional machine-local overrides (toolchain paths, SQLite3 prefix). Never
+# committed - see "Gates" in README.md. Included first so it wins over the
+# defaults below.
+-include ../Makefile.local
 
-CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -Wformat=2 -Werror -g -O2
-SAN_FLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -fsanitize=undefined -g -O1
+# Toolchain: the defaults are the names MinGW-w64/MSYS2 put on PATH. Override with
+# e.g. mingw32-make CC_GCC=gcc CC_CLANG=clang gate
+CC_GCC ?= gcc
+CC_CLANG ?= clang
+
+# Do not embed absolute paths (in particular the checkout location) in the debug
+# info of the gate binaries.
+PREFIX_MAP = -ffile-prefix-map=$(CURDIR)=. -ffile-prefix-map=$(CURDIR)/..=.
+CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -Wformat=2 -Werror -g -O2 $(PREFIX_MAP)
+SAN_FLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -fsanitize=undefined -g -O1 $(PREFIX_MAP)
 
 all: build
 

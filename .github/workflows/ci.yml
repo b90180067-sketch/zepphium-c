@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-modules:
+    name: Portable modules + harnesses (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SQLite3 development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev
+
+      # Every module is compiled with the project's warning set (-Werror) and its
+      # recorded cases are replayed by <module>/harness/diff_runner.c.
+      - name: Build modules and run harnesses
+        run: |
+          set -euo pipefail
+          CFLAGS="-std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -Wformat=2 -Werror -O2"
+          SQLITE_CFLAGS="$(pkg-config --cflags sqlite3)"
+          SQLITE_LIBS="$(pkg-config --libs sqlite3)"
+
+          run_harness() {
+            unit="$1"; shift
+            gcc $CFLAGS -I. $SQLITE_CFLAGS "$@" "$unit/harness/diff_runner.c" \
+                $SQLITE_LIBS -lm -o "/tmp/harness-$unit"
+            ( cd "$unit" && "/tmp/harness-$unit" cases.jsonl )
+          }
+
+          run_harness zoom         zoom/port.c
+          run_harness geometry     geometry/port.c
+          run_harness ids          ids/port.c
+          run_harness navigation   navigation/port.c
+          run_harness blocker      blocker/port.c
+          run_harness store        store/port.c
+          run_harness browser_core browser_core/port.c zoom/port.c geometry/port.c \
+              ids/port.c navigation/port.c blocker/port.c store/port.c

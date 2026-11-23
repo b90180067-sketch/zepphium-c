@@ -38,9 +38,19 @@ bool zephium_nav_search_query(const char *input, size_t input_len, char *out_url
 
 /**
  * Gate for whether a URL is allowed to commit in a browser tab.
- * Allows exact "about:blank" and clean http(s) URLs without credentials and not targeting reserved hosts.
+ * Allows exact "about:blank" and clean http(s) URLs that carry no credentials, do not target a
+ * reserved host, and do not reach loopback / private / link-local addresses or "localhost".
  */
 bool zephium_nav_is_allowed(const char *url_str, size_t len);
+
+/**
+ * Copies url into out_url with the query string and fragment removed, so
+ * "https://site/a?token=x#f" becomes "https://site/a". Logs, diagnostics and the
+ * history table must go through this: query strings and fragments regularly carry
+ * session tokens, e-mail addresses and search terms. Returns false on invalid input
+ * or when out_url cannot hold the result.
+ */
+bool zephium_nav_redact_url(const char *url, size_t url_len, char *out_url, size_t out_len);
 
 /**
  * Typed text read strictly as a web address (e.g. for bookmarking).

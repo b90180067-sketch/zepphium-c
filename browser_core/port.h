@@ -12,6 +12,8 @@
 #include "../blocker/port.h"
 #include "../store/port.h"
 
+#include "safe_string.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -20,6 +22,8 @@ extern "C" {
 
 typedef struct {
     zephium_id_t id;
+    /* Fixed-size fields: write them through zephium_strcpy_safe(), never with
+     * strcpy/strncpy/unchecked memcpy. */
     char current_url[ZEPHIUM_MAX_URL_BYTES];
     char title[512];
     uint16_t zoom_percent;

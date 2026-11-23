@@ -126,6 +126,13 @@ Khi tắt, browser in cảnh báo `[WARN] [SANDBOX] WebKit sandbox DISABLED (...
 chạy với toàn bộ quyền của user, nên chỉ dùng khi thật cần. `run_wsl.sh` không còn export
 `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS`; `ZEPHIUM_NO_SANDBOX=1` là công tắc duy nhất.
 
+**Popup, tải file, tìm trong trang**: `target="_blank"`/`window.open` mở thành **tab mới**
+(URL vẫn phải qua allow-list như ô địa chỉ). File tải về nằm trong thư mục **Downloads** của
+user với tên đã làm sạch (chỉ lấy phần cuối, bỏ dấu phân cách đường dẫn và dấu chấm ở đầu) và
+được ghi vào bảng `downloads` (state 0 → 1). `Ctrl+F` mở thanh tìm trong trang: gõ để tìm,
+`Enter`/`Shift+Enter` tiến/lùi, `Esc` đóng. Lỗi chứng chỉ TLS **chặn** trang và hiện trang
+"Insecure connection blocked" — không có tuỳ chọn bỏ qua chứng chỉ.
+
 Kiểm tra sau khi chạy: `python3 read_log.py` (các mục `[RENDER]`, `[MEDIA]`, `[PAGE]`).
 Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zephium --headless` (REPL).
 

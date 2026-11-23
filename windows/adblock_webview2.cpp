@@ -288,9 +288,16 @@ static bool EnsureDirectory(const std::wstring &path) {
 }
 
 /* Creates every missing component; %LOCALAPPDATA%\Zephium\adblock needs two new
- * levels on a fresh profile. */
-static bool EnsureDirectoryTree(const std::wstring &path) {
-    if (path.empty()) return false;
+ * levels on a fresh profile.  Reports the Win32 error of the first component that
+ * could not be created so a failure can be logged with a reason instead of a
+ * bare "could not create". */
+static bool EnsureDirectoryTreeEx(const std::wstring &path, DWORD *error_out) {
+    if (error_out) *error_out = ERROR_SUCCESS;
+    if (path.empty()) {
+        if (error_out) *error_out = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    DWORD first_error = ERROR_SUCCESS;
     std::wstring current;
     current.reserve(path.size());
     for (size_t i = 0; i < path.size(); ++i) {
@@ -299,11 +306,21 @@ static bool EnsureDirectoryTree(const std::wstring &path) {
         const bool drive_root =
             current.size() == 3 && current[1] == L':' && separator;
         if ((separator && !drive_root) || i + 1 == path.size()) {
-            CreateDirectoryW(current.c_str(), nullptr);
+            if (!CreateDirectoryW(current.c_str(), nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_ALREADY_EXISTS && first_error == ERROR_SUCCESS) {
+                    first_error = error;
+                }
+            }
         }
     }
     const DWORD attributes = GetFileAttributesW(path.c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const bool ok = attributes != INVALID_FILE_ATTRIBUTES &&
+                    (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (!ok && error_out) {
+        *error_out = first_error != ERROR_SUCCESS ? first_error : ERROR_PATH_NOT_FOUND;
+    }
+    return ok;
 }
 
 static bool ReadFileBytes(const std::wstring &path, size_t max_bytes,
@@ -343,28 +360,40 @@ static bool WriteFileAtomic(const std::wstring &path, const void *data, size_t s
     std::wstring temp = path + L".tmp";
     HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
+    if (file == INVALID_HANDLE_VALUE) {
+        AdblockLog(L"adblock: cannot create %ls (error %lu)", temp.c_str(),
+                   (unsigned long)GetLastError());
+        return false;
+    }
     const unsigned char *bytes = (const unsigned char *)data;
     size_t offset = 0;
     bool ok = true;
+    DWORD failure = ERROR_SUCCESS;
     while (offset < size) {
         DWORD chunk = (DWORD)((size - offset) > (1u << 20) ? (1u << 20) : (size - offset));
         DWORD written = 0;
         if (!WriteFile(file, bytes + offset, chunk, &written, nullptr) || written == 0) {
+            failure = GetLastError();
             ok = false;
             break;
         }
         offset += written;
     }
-    if (ok) ok = FlushFileBuffers(file) != 0;
+    if (ok && !FlushFileBuffers(file)) failure = GetLastError();
+    if (!failure && !ok && failure == ERROR_SUCCESS) failure = ERROR_WRITE_FAULT;
     CloseHandle(file);
-    if (!ok) {
+    if (!ok || failure != ERROR_SUCCESS) {
         DeleteFileW(temp.c_str());
+        AdblockLog(L"adblock: cannot write %ls (error %lu)", temp.c_str(),
+                   (unsigned long)failure);
         return false;
     }
     if (!MoveFileExW(temp.c_str(), path.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD error = GetLastError();
         DeleteFileW(temp.c_str());
+        AdblockLog(L"adblock: cannot replace %ls (error %lu)", path.c_str(),
+                   (unsigned long)error);
         return false;
     }
     return true;
@@ -968,6 +997,32 @@ std::wstring zephium_adblock_root_dir(const std::wstring &exe_dir) {
     return JoinPath(exe_dir, L"zephium_adblock");
 }
 
+/* Picks a writable data directory: the configured/preferred one first, then one
+ * next to the exe.  A locked-down profile (or a process running under a sandbox
+ * that only allows writes inside its workspace) used to make ad blocking
+ * silently impossible - every list write failed while the feature still claimed
+ * to be enabled.  The fallback keeps it working, and the log names both the
+ * failure and the directory actually used. */
+static bool PrepareRootDir(const std::wstring &exe_dir, const std::wstring &preferred,
+                           std::wstring *chosen, std::wstring *detail) {
+    std::vector<std::wstring> candidates;
+    candidates.push_back(preferred);
+    if (!exe_dir.empty()) {
+        const std::wstring beside_exe = JoinPath(exe_dir, L"zephium_adblock");
+        if (beside_exe != preferred) candidates.push_back(beside_exe);
+    }
+    for (const std::wstring &candidate : candidates) {
+        DWORD error = ERROR_SUCCESS;
+        if (EnsureDirectoryTreeEx(candidate, &error)) {
+            *chosen = candidate;
+            return true;
+        }
+        if (!detail->empty()) *detail += L"; ";
+        *detail += candidate + L" (error " + std::to_wstring((unsigned long)error) + L")";
+    }
+    return false;
+}
+
 bool zephium_adblock_start(const ZephiumAdblockConfig &config) {
     if (g_started) return g_enabled;
     g_started = true;
@@ -984,10 +1039,23 @@ bool zephium_adblock_start(const ZephiumAdblockConfig &config) {
         return false;
     }
 
-    g_root = zephium_adblock_root_dir(config.exe_dir);
-    if (!EnsureDirectoryTree(g_root)) {
-        AdblockLog(L"adblock: could not create %ls; filter lists cannot be stored",
-                   g_root.c_str());
+    const std::wstring preferred_root = zephium_adblock_root_dir(config.exe_dir);
+    g_root = preferred_root;
+    {
+        std::wstring chosen;
+        std::wstring detail;
+        if (PrepareRootDir(config.exe_dir, preferred_root, &chosen, &detail)) {
+            g_root = chosen;
+            if (chosen != preferred_root) {
+                AdblockLog(L"adblock: %ls is not writable (%ls); storing filter lists in %ls "
+                           L"instead",
+                           preferred_root.c_str(), detail.c_str(), chosen.c_str());
+            }
+        } else {
+            AdblockLog(L"adblock: no writable data directory (%ls); filter lists cannot be "
+                       L"stored, only an existing engine cache can be loaded",
+                       detail.c_str());
+        }
     }
     EnsureDirectory(ListsDirectory());
 

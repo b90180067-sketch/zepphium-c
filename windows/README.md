@@ -195,6 +195,11 @@ keeps working.
 ```
 
 - `%LOCALAPPDATA%` is used because the exe directory may be read-only (Program
+- If `%LOCALAPPDATA%\Zephium\adblock` cannot be created (locked-down profile or a
+  process whose write access is restricted to its workspace), the shell falls back to
+  `<exe dir>\zephium_adblock` and logs both paths plus the Win32 error code; only when
+  neither is writable does ad blocking run without lists (an existing engine cache can
+  still be loaded). Failed list writes log the path and the Win32 error as well.
   Files) while the lists and the ~7 MB cache must be writable. `ZEPHIUM_ADBLOCK_DIR=<dir>`
   overrides the whole tree (the self test uses it so tests never touch the
   production directory).

@@ -170,6 +170,11 @@ Danh sách mặc định (raw ABP/uBO text, tải bằng WinHTTP trên worker th
 Thư mục dữ liệu: `%LOCALAPPDATA%\Zephium\adblock\` (không dùng thư mục exe vì
 bản cài trong `Program Files` là read-only), hoặc `$ZEPHIUM_ADBLOCK_DIR`.
 
+Nếu thư mục đó không tạo được (profile bị khoá quyền, hoặc tiến trình chạy trong môi
+trường chỉ cho ghi trong workspace), shell tự chuyển sang `<thư mục exe>\zephium_adblock`
+và log cả hai đường dẫn kèm mã lỗi Win32; chỉ khi cả hai đều không ghi được thì ad blocking
+chạy không có danh sách (cache `engine.bin` có sẵn vẫn load được).
+
 ```
 %LOCALAPPDATA%\Zephium\adblock\
 ├── lists\easylist.txt ...      # bản tải về, ghi atomic

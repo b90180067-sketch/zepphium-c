@@ -35,9 +35,16 @@ windows/WebView2*.zip
 windows/zephium_webview2_profile/
 windows/*.WebView2/
 
-# ---- Windows shell extensions (user-installed; third-party code, never commit) ----
-windows/extensions/*
-!windows/extensions/README.md
+# ---- Native ad blocking (Windows) ----
+# Downloaded filter lists, the binary engine cache and the adblock log are
+# runtime data, never committed. The Rust engine source is in blocker/rust; only
+# its build output is ignored.
+blocker/rust/target/
+windows/zephium_adblock/
+
+# ---- WSL/Linux out-of-tree build trees ----
+build-wsl/
+build-*/
 
 # ---- Local scratch ----
 .tmp_*

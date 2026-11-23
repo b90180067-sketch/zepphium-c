@@ -1,0 +1,32 @@
+[package]
+name = "zephium_adblock"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "C ABI shim around Brave's adblock-rust engine for Zephium's WebView2 network blocking"
+license = "MPL-2.0"
+
+# A static archive is linked straight into windows/zephium_win.exe (MinGW), so
+# shipping one exe does not depend on a DLL next to it being present/updated.
+[lib]
+name = "zephium_adblock"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Brave's engine (MPL-2.0). Default features keep "single-thread" for the fastest
+# regex path; the FFI layer makes that sound by pinning every handle to the thread
+# that created it (see blocker/adblock_ffi.h).
+adblock = "0.13.6"
+base64 = "0.23"
+
+# panic = "unwind" is REQUIRED: the FFI catches panics with catch_unwind so a
+# broken rule or a bug in the engine cannot take the browser down through the C
+# boundary. panic = "abort" would silently break that guarantee.
+[profile.release]
+opt-level = 3
+codegen-units = 1
+debug = false
+panic = "unwind"
+lto = true
+strip = false

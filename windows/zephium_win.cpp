@@ -12,6 +12,7 @@
 #include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <sddl.h>
 #include <cstdio>
 #include <cstdarg>
@@ -22,9 +23,54 @@
 
 #include "WebView2.h"
 
+#include "adblock_webview2.h"
+
 extern "C" {
 #include "../browser_core/port.h"
 }
+
+/* The ad-block helpers mirror the WebView2 resource-context enum by number so
+ * the console self test can include adblock_webview2.h without WebView2/COM.
+ * If a future SDK renumbers the enum this fails at compile time instead of
+ * silently mis-classifying requests. */
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL == ZEPHIUM_W2_CONTEXT_ALL,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT == ZEPHIUM_W2_CONTEXT_DOCUMENT,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET == ZEPHIUM_W2_CONTEXT_STYLESHEET,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE == ZEPHIUM_W2_CONTEXT_IMAGE,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MEDIA == ZEPHIUM_W2_CONTEXT_MEDIA,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FONT == ZEPHIUM_W2_CONTEXT_FONT,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT == ZEPHIUM_W2_CONTEXT_SCRIPT,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST ==
+                  ZEPHIUM_W2_CONTEXT_XMLHTTPREQUEST,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FETCH == ZEPHIUM_W2_CONTEXT_FETCH,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_TEXT_TRACK == ZEPHIUM_W2_CONTEXT_TEXTTRACK,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_EVENT_SOURCE ==
+                  ZEPHIUM_W2_CONTEXT_EVENTSOURCE,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_WEBSOCKET == ZEPHIUM_W2_CONTEXT_WEBSOCKET,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MANIFEST == ZEPHIUM_W2_CONTEXT_MANIFEST,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SIGNED_EXCHANGE ==
+                  ZEPHIUM_W2_CONTEXT_SIGNEDEXCHANGE,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_PING == ZEPHIUM_W2_CONTEXT_PING,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_CSP_VIOLATION_REPORT ==
+                  ZEPHIUM_W2_CONTEXT_CSP_VIOLATION_REPORT,
+              "WebView2 resource context enum drifted");
+static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER == ZEPHIUM_W2_CONTEXT_OTHER,
+              "WebView2 resource context enum drifted");
 
 /* ---------------------------------------------------------------- constants */
 #define ZEPHIUM_WINDOW_CLASS L"ZephiumWin32TabbedWindow"
@@ -64,6 +110,9 @@ struct ZephiumTab {
     bool sleeping = false;
     bool creating = false;
     ULONGLONG last_active = 0;
+    /* Ad-block state for this tab: the current document URL and the bounded set
+     * of iframe URLs (WebView2 reports iframe navigations as DOCUMENT). */
+    ZephiumAdblockFrameTracker adblock;
 };
 
 struct TabGeometry {
@@ -93,6 +142,7 @@ static POINT g_mouse = {-1, -1};
 
 static int g_zoom_percent = 100;
 static int g_sleep_seconds = 600;          /* 0 disables hibernation */
+static bool g_adblock_enabled = true;      /* --no-adblock / ZEPHIUM_ADBLOCK=0 */
 static std::wstring g_initial_url;
 static std::wstring g_exe_dir;
 static std::wstring g_log_path;
@@ -111,6 +161,13 @@ static void Log(const wchar_t *fmt, ...) {
     va_end(ap);
     fwprintf(f, L"\n");
     fclose(f);
+}
+
+/* The ad-block subsystem formats its own lines (it also logs from the download
+ * thread); route them through the shell log so every line is timestamped and
+ * lands in the same file. */
+static void AdblockLogLine(const wchar_t *line) {
+    Log(L"%ls", line);
 }
 
 static std::string WideToUtf8(const std::wstring &w) {
@@ -186,17 +243,6 @@ static const GUID kIID_AccelHandler = {0xb29c7e28, 0xfa79, 0x41a8,
                                        {0x8e, 0x44, 0x65, 0x81, 0x1c, 0x76, 0xdc, 0xb2}};
 static const GUID kIID_WebView2_8 = {0xe9632730, 0x6e1e, 0x43ab,
                                      {0xb7, 0xb8, 0x7b, 0x2c, 0x9e, 0x62, 0xe0, 0x94}};
-/* Browser extensions (WebView2 1.0.2210.55+): the environment option that turns
- * the feature on, the profile that accepts an unpacked extension, and the wait
- * handler for it. */
-static const GUID kIID_EnvOptions6 = {0x57d29cc3, 0xc84f, 0x42a0,
-                                     {0xb0, 0xe2, 0xef, 0xfb, 0xd5, 0xe1, 0x79, 0xde}};
-static const GUID kIID_WebView2_13 = {0xf75f09a8, 0x667e, 0x4983,
-                                     {0x88, 0xd6, 0xc8, 0x77, 0x3f, 0x31, 0x5e, 0x84}};
-static const GUID kIID_Profile7 = {0x7b4c7906, 0xa1aa, 0x4cb4,
-                                  {0xb7, 0x23, 0xdb, 0x09, 0xf8, 0x13, 0xd5, 0x41}};
-static const GUID kIID_ExtensionHandler = {0xdf1aab27, 0x82b9, 0x4ab6,
-                                          {0xaa, 0xe8, 0x01, 0x7a, 0x49, 0x39, 0x8c, 0x14}};
 
 
 static bool GuidEq(REFIID a, const GUID &b) {
@@ -239,19 +285,17 @@ static HRESULT CoStrDup(const std::wstring &src, LPWSTR *out) {
     return S_OK;
 }
 
-/* Environment options. ICoreWebView2EnvironmentOptions carries the Chromium
- * switches; ICoreWebView2EnvironmentOptions6 is what turns the browser-extension
- * feature on, and WebView2 only uses it if this same object answers QueryInterface
- * for it, so the class implements both interfaces. */
-class ZephiumEnvOptions : public ICoreWebView2EnvironmentOptions,
-                          public ICoreWebView2EnvironmentOptions6 {
+/* Environment options: ICoreWebView2EnvironmentOptions carries the Chromium
+ * switches.  It is implemented by hand because the SDK helper class needs WRL,
+ * which MinGW does not ship. */
+class ZephiumEnvOptions : public ICoreWebView2EnvironmentOptions {
 public:
     /* Must match the SDK: an empty TargetCompatibleBrowserVersion makes
      * CreateCoreWebView2EnvironmentWithOptions fail with E_INVALIDARG. */
     static constexpr wchar_t kTargetVersion[] = L"158.0.4370.26";
 
-    ZephiumEnvOptions(const std::wstring &args, bool extensions_enabled)
-        : m_args(args), m_version(kTargetVersion), m_extensions(extensions_enabled ? TRUE : FALSE) {}
+    explicit ZephiumEnvOptions(const std::wstring &args)
+        : m_args(args), m_version(kTargetVersion) {}
     virtual ~ZephiumEnvOptions() = default;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
@@ -259,8 +303,6 @@ public:
         *ppv = nullptr;
         if (GuidEq(riid, kIID_IUnknown_) || GuidEq(riid, kIID_EnvOptions)) {
             *ppv = static_cast<ICoreWebView2EnvironmentOptions *>(this);
-        } else if (GuidEq(riid, kIID_EnvOptions6)) {
-            *ppv = static_cast<ICoreWebView2EnvironmentOptions6 *>(this);
         } else {
             return E_NOINTERFACE;
         }
@@ -303,22 +345,11 @@ public:
         return S_OK;
     }
 
-    HRESULT STDMETHODCALLTYPE get_AreBrowserExtensionsEnabled(BOOL *value) override {
-        if (!value) return E_POINTER;
-        *value = m_extensions;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE put_AreBrowserExtensionsEnabled(BOOL value) override {
-        m_extensions = value;
-        return S_OK;
-    }
-
 private:
     std::wstring m_args;
     std::wstring m_lang;
     std::wstring m_version;
     BOOL m_sso = FALSE;
-    BOOL m_extensions = FALSE;
     volatile LONG m_ref = 1;
 };
 
@@ -669,102 +700,390 @@ private:
     std::string m_id;
 };
 
-/* ------------------------------------------------------------- extensions */
+/* ------------------------------------------------------------ ad blocking */
+/* Native network-level filtering: every request WebView2 is about to send is
+ * checked against the adblock-rust engine (blocker/adblock_ffi.h) before
+ * Chromium sends it. The handlers below only ever touch the event args for an
+ * explicit BLOCK/REDIRECT verdict; everything else - including any error - lets
+ * the request through unchanged, because a broken blocker must never break
+ * browsing.
+ *
+ * The engine handle is thread affine, so it is created, used and freed on this
+ * UI thread only (WebView2 raises these events on the UI thread). The filter
+ * list downloader runs on its own thread and never touches the engine; it asks
+ * the UI thread to rebuild through ZEPHIUM_ADBLOCK_WM_REFRESH. */
 
-/* Ad blocking on Windows rides on the WebView2 browser-extension feature: an
- * unpacked content blocker (uBlock Origin Lite, AdGuard, ...) is loaded from
- * windows/extensions/<folder>. Nothing is bundled here - the user installs the
- * extension - and a failure only costs ad blocking, never browsing. */
-static bool g_extensions_enabled = true;
-static bool g_extensions_requested = false;
+/* Same IIDs as the SDK constants of the same names; copied as plain GUIDs so the
+ * ZephiumCom template can take a compile-time pointer (same pattern as the other
+ * handlers above). */
+static const GUID kIID_WebResourceRequested = {0xab00b74c, 0x15f1, 0x4646,
+                                               {0x80, 0xe8, 0xe7, 0x63, 0x41, 0xd2, 0x5d, 0x71}};
+static const GUID kIID_FrameCreated = {0x38059770, 0x9baa, 0x11eb,
+                                       {0xa8, 0xb3, 0x02, 0x42, 0xac, 0x13, 0x00, 0x03}};
+static const GUID kIID_FrameNavigationStarting = {0xe79908bf, 0x2d5d, 0x4968,
+                                                  {0x83, 0xdb, 0x26, 0x3f, 0xea, 0x2c, 0x1d, 0xa3}};
+static const GUID kIID_NavigationStarting = {0x9adbe429, 0xf36d, 0x432b,
+                                              {0x9d, 0xdc, 0xf8, 0x88, 0x1f, 0xbd, 0x76, 0xe3}};
+static const GUID kIID_SourceChanged = {0x3c067f9f, 0x5388, 0x4772,
+                                        {0x8b, 0x48, 0x79, 0xf7, 0xef, 0x1a, 0xb3, 0x7c}};
 
-class ZephiumExtensionHandler
-    : public ZephiumCom<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler, &kIID_ExtensionHandler> {
-public:
-    explicit ZephiumExtensionHandler(std::wstring name) : m_name(std::move(name)) {}
-    HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2BrowserExtension *extension) override;
+/* Request events can be extremely frequent (hundreds per page); logging every
+ * decision would both slow pages down and make the log useless. The first few
+ * of each kind are logged in full, the rest only appear in the stats line. */
+static unsigned g_adblock_block_logs = 0;
+static unsigned g_adblock_redirect_logs = 0;
+static unsigned g_adblock_rewrite_logs = 0;
+static const unsigned kAdblockDecisionLogCap = 20;
 
-private:
-    std::wstring m_name;
-};
-
-HRESULT STDMETHODCALLTYPE ZephiumExtensionHandler::Invoke(HRESULT result,
-                                                          ICoreWebView2BrowserExtension *extension) {
-    if (FAILED(result) || !extension) {
-        Log(L"extension failed: %ls (0x%08lx)", m_name.c_str(), (unsigned long)result);
-        return S_OK;
-    }
-
-    std::wstring name, id;
-    LPWSTR value = nullptr;
-    if (SUCCEEDED(extension->get_Name(&value)) && value) {
-        name.assign(value);
-        CoTaskMemFree(value);
-        value = nullptr;
-    }
-    if (SUCCEEDED(extension->get_Id(&value)) && value) {
-        id.assign(value);
-        CoTaskMemFree(value);
-    }
-    Log(L"extension loaded: %ls (id=%ls) from %ls", name.c_str(), id.c_str(), m_name.c_str());
-    return S_OK;
+static std::string TakeComString(LPWSTR value) {
+    if (!value) return std::string();
+    std::string out = WideToUtf8(value);
+    CoTaskMemFree(value);
+    return out;
 }
 
-/* Adds every unpacked extension folder under windows/extensions/ to the default
- * profile. Runs once, on the first CoreWebView2 that exists. */
-static void LoadBrowserExtensions(ICoreWebView2 *view) {
-    if (!g_extensions_enabled || g_extensions_requested || !view) return;
-    g_extensions_requested = true;
-
-    ICoreWebView2_13 *view13 = nullptr;
-    if (FAILED(view->QueryInterface(kIID_WebView2_13, (void **)&view13)) || !view13) {
-        Log(L"extensions: ICoreWebView2_13 missing, ad blocking not loaded");
+/* Builds a synthetic response for the request.  The stream is created from a
+ * copy of the body, so the engine result buffer (valid only until the next
+ * check on the same handle) may be reused immediately. */
+static void AdblockSetResponse(ICoreWebView2WebResourceRequestedEventArgs *args, int status,
+                               const wchar_t *reason, const wchar_t *headers,
+                               const unsigned char *body, size_t body_len) {
+    if (!args || !g_env) return;
+    IStream *stream = SHCreateMemStream(body_len ? body : nullptr, (UINT)body_len);
+    if (!stream) {
+        Log(L"adblock: SHCreateMemStream failed; request allowed");
         return;
     }
-    ICoreWebView2Profile *profile = nullptr;
-    HRESULT hr = view13->get_Profile(&profile);
-    view13->Release();
-    if (FAILED(hr) || !profile) {
-        Log(L"extensions: no profile (0x%08lx), ad blocking not loaded", (unsigned long)hr);
-        return;
-    }
-
-    ICoreWebView2Profile7 *profile7 = nullptr;
-    hr = profile->QueryInterface(kIID_Profile7, (void **)&profile7);
-    profile->Release();
-    if (FAILED(hr) || !profile7) {
-        Log(L"extensions: ICoreWebView2Profile7 missing (0x%08lx), ad blocking not loaded",
+    ICoreWebView2WebResourceResponse *response = nullptr;
+    const HRESULT hr =
+        g_env->CreateWebResourceResponse(stream, status, reason, headers, &response);
+    stream->Release();
+    if (FAILED(hr) || !response) {
+        Log(L"adblock: CreateWebResourceResponse failed (0x%08lx); request allowed",
             (unsigned long)hr);
         return;
     }
+    const HRESULT put = args->put_Response(response);
+    response->Release();
+    if (FAILED(put)) {
+        Log(L"adblock: put_Response failed (0x%08lx); request allowed", (unsigned long)put);
+    }
+}
 
-    std::wstring root = g_exe_dir + L"\\extensions";
-    WIN32_FIND_DATAW entry = {};
-    HANDLE find = FindFirstFileW((root + L"\\*").c_str(), &entry);
-    if (find == INVALID_HANDLE_VALUE) {
-        Log(L"extensions: no extensions folder next to the exe, ad blocking not loaded");
-        profile7->Release();
+/* Header values come from the engine, so keep them free of CR/LF: a response we
+ * fabricate must not be a header-injection primitive. */
+static bool HeaderValueSafe(const std::wstring &value) {
+    if (value.empty()) return false;
+    for (wchar_t c : value) {
+        if (c < 0x20 || c == 0x7f) return false;
+    }
+    return true;
+}
+
+static std::wstring AdblockResponseHeaders(const zephium_adblock_result_t &result,
+                                           zephium_adblock_resource_type_t type) {
+    std::wstring mime = result.redirect_mime ? Utf8ToWide(result.redirect_mime) : std::wstring();
+    if (!HeaderValueSafe(mime)) mime = L"text/plain";
+    std::wstring headers = L"Content-Type: " + mime + L"\r\n";
+    /* A script/stylesheet body served from a memory stream has no network origin;
+     * pages with strict CORS would otherwise refuse to execute/apply it. */
+    if (type == ZEPHIUM_ADBLOCK_RES_SCRIPT || type == ZEPHIUM_ADBLOCK_RES_STYLESHEET) {
+        headers += L"Access-Control-Allow-Origin: *\r\n";
+    }
+    return headers;
+}
+
+static void LogAdblockBlocked(const ZephiumTab *tab, zephium_adblock_resource_type_t type,
+                              const std::string &url) {
+    if (g_adblock_block_logs >= kAdblockDecisionLogCap) return;
+    ++g_adblock_block_logs;
+    Log(L"adblock: blocked %ls request in tab %d: %ls",
+        zephium_adblock_wide(zephium_adblock_type_name(type)).c_str(), tab->id,
+        RedactUrl(zephium_adblock_wide(url)).c_str());
+    if (g_adblock_block_logs == kAdblockDecisionLogCap) {
+        Log(L"adblock: further blocked requests are counted in the stats line only");
+    }
+}
+
+static void LogAdblockRedirect(const ZephiumTab *tab, zephium_adblock_resource_type_t type,
+                               const std::string &url, const zephium_adblock_result_t &result) {
+    if (g_adblock_redirect_logs >= kAdblockDecisionLogCap) return;
+    ++g_adblock_redirect_logs;
+    const std::wstring mime = result.redirect_mime
+                                  ? zephium_adblock_wide(result.redirect_mime)
+                                  : std::wstring(L"?");
+    Log(L"adblock: served %ls placeholder (%ls, %zu bytes) in tab %d for %ls",
+        zephium_adblock_wide(zephium_adblock_type_name(type)).c_str(), mime.c_str(),
+        result.redirect_len, tab->id, RedactUrl(zephium_adblock_wide(url)).c_str());
+}
+
+static void LogAdblockRewrite(const ZephiumTab *tab, zephium_adblock_resource_type_t type,
+                              const std::string &url, const zephium_adblock_result_t &result) {
+    if (g_adblock_rewrite_logs >= kAdblockDecisionLogCap) return;
+    ++g_adblock_rewrite_logs;
+    const std::wstring rewritten =
+        result.rewritten_url
+            ? zephium_adblock_wide(std::string(result.rewritten_url, result.rewritten_len))
+            : std::wstring();
+    Log(L"adblock: $removeparam rewrite (not supported by WebView2) for %ls in tab %d: %ls "
+        L"-> %ls",
+        zephium_adblock_wide(zephium_adblock_type_name(type)).c_str(), tab->id,
+        RedactUrl(zephium_adblock_wide(url)).c_str(), RedactUrl(rewritten).c_str());
+}
+
+class ZephiumWebResourceHandler
+    : public ZephiumCom<ICoreWebView2WebResourceRequestedEventHandler, &kIID_WebResourceRequested> {
+public:
+    explicit ZephiumWebResourceHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender,
+                                     ICoreWebView2WebResourceRequestedEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
+/* FrameCreated -> the frame's own navigation events.  WebView2 reports iframe
+ * document requests as COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT, so the shell
+ * remembers frame navigation URLs and re-labels those requests SUBDOCUMENT. */
+class ZephiumFrameCreatedHandler
+    : public ZephiumCom<ICoreWebView2FrameCreatedEventHandler, &kIID_FrameCreated> {
+public:
+    explicit ZephiumFrameCreatedHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender,
+                                     ICoreWebView2FrameCreatedEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
+class ZephiumFrameNavigationHandler
+    : public ZephiumCom<ICoreWebView2FrameNavigationStartingEventHandler,
+                        &kIID_FrameNavigationStarting> {
+public:
+    explicit ZephiumFrameNavigationHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2Frame *sender,
+                                     ICoreWebView2NavigationStartingEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
+/* Main-frame navigation: a new top-level document means the previous document's
+ * iframe set is stale, and the new URL becomes the fallback source URL. */
+class ZephiumDocumentNavigationHandler
+    : public ZephiumCom<ICoreWebView2NavigationStartingEventHandler, &kIID_NavigationStarting> {
+public:
+    explicit ZephiumDocumentNavigationHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender,
+                                     ICoreWebView2NavigationStartingEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
+class ZephiumSourceChangedHandler
+    : public ZephiumCom<ICoreWebView2SourceChangedEventHandler, &kIID_SourceChanged> {
+public:
+    explicit ZephiumSourceChangedHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender,
+                                     ICoreWebView2SourceChangedEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
+HRESULT STDMETHODCALLTYPE ZephiumWebResourceHandler::Invoke(
+    ICoreWebView2 *, ICoreWebView2WebResourceRequestedEventArgs *args) {
+    /* No exception may escape into WebView2, and every early return leaves the
+     * args untouched, i.e. the request is sent as-is. */
+    try {
+        if (!args || !zephium_adblock_is_ready()) return S_OK;
+        ZephiumTab *tab = FindTabById(m_tab_id);
+        if (!tab) return S_OK;
+
+        ICoreWebView2WebResourceRequest *request = nullptr;
+        if (FAILED(args->get_Request(&request)) || !request) return S_OK;
+
+        std::string url;
+        std::string method;
+        LPWSTR value = nullptr;
+        if (SUCCEEDED(request->get_Uri(&value)) && value) url = TakeComString(value);
+        value = nullptr;
+        if (SUCCEEDED(request->get_Method(&value)) && value) method = TakeComString(value);
+
+        std::string referer;
+        ICoreWebView2HttpRequestHeaders *headers = nullptr;
+        if (SUCCEEDED(request->get_Headers(&headers)) && headers) {
+            value = nullptr;
+            if (SUCCEEDED(headers->GetHeader(L"Referer", &value)) && value) {
+                referer = TakeComString(value);
+            }
+            headers->Release();
+        }
+        request->Release();
+        if (url.empty()) return S_OK;
+
+        COREWEBVIEW2_WEB_RESOURCE_CONTEXT context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER;
+        if (FAILED(args->get_ResourceContext(&context))) {
+            context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER;
+        }
+
+        const zephium_adblock_resource_type_t type =
+            zephium_adblock_classify((int)context, url, tab->adblock);
+        const std::string source =
+            zephium_adblock_source_url(type, url, referer, tab->adblock.document_url());
+
+        zephium_adblock_result_t result = {};
+        if (zephium_adblock_check_url(url, source, type, method, &result) !=
+            ZEPHIUM_ADBLOCK_OK) {
+            return S_OK;  /* fail open */
+        }
+        switch (result.verdict) {
+        case ZEPHIUM_ADBLOCK_BLOCK:
+            /* 204 No Content: Chromium sends no network traffic and the page gets
+             * an empty resource. */
+            AdblockSetResponse(args, 204, L"No Content", L"", nullptr, 0);
+            LogAdblockBlocked(tab, type, url);
+            break;
+        case ZEPHIUM_ADBLOCK_REDIRECT: {
+            const std::wstring response_headers = AdblockResponseHeaders(result, type);
+            AdblockSetResponse(args, 200, L"OK", response_headers.c_str(),
+                               (const unsigned char *)result.redirect_body, result.redirect_len);
+            LogAdblockRedirect(tab, type, url, result);
+            break;
+        }
+        case ZEPHIUM_ADBLOCK_REWRITE:
+            /* WebView2 cannot replace a request URL from this event; count it
+             * (engine stats) and let the request through. See windows/README.md
+             * for the CDP Network.setBlockedURLs alternative we did not take. */
+            LogAdblockRewrite(tab, type, url, result);
+            break;
+        case ZEPHIUM_ADBLOCK_ALLOW:
+        default:
+            break;
+        }
+    } catch (...) {
+        Log(L"adblock: exception while filtering a request; request left untouched");
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumFrameCreatedHandler::Invoke(
+    ICoreWebView2 *, ICoreWebView2FrameCreatedEventArgs *args) {
+    try {
+        if (!args) return S_OK;
+        ICoreWebView2Frame *frame = nullptr;
+        if (FAILED(args->get_Frame(&frame)) || !frame) return S_OK;
+        /* NavigationStarting lives on ICoreWebView2Frame2 (FrameCreated exists
+         * since runtime 1.0.1082; the QI is cheap and fails gracefully). */
+        ICoreWebView2Frame2 *frame2 = nullptr;
+        if (SUCCEEDED(frame->QueryInterface(IID_ICoreWebView2Frame2, (void **)&frame2)) &&
+            frame2) {
+            EventRegistrationToken token = {};
+            ZephiumFrameNavigationHandler *handler = new ZephiumFrameNavigationHandler(m_tab_id);
+            frame2->add_NavigationStarting(handler, &token);  /* takes its own reference */
+            handler->Release();                               /* drop our constructor ref */
+            frame2->Release();
+        }
+        /* The handler is owned by the frame (which WebView2 owns) and holds only
+         * the tab id, so a destroyed iframe cannot leak a COM reference here. */
+        frame->Release();
+    } catch (...) {
+        Log(L"adblock: exception while installing iframe tracking; iframes stay documents");
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumFrameNavigationHandler::Invoke(
+    ICoreWebView2Frame *, ICoreWebView2NavigationStartingEventArgs *args) {
+    try {
+        if (!args) return S_OK;
+        ZephiumTab *tab = FindTabById(m_tab_id);
+        if (!tab) return S_OK;
+        LPWSTR value = nullptr;
+        if (SUCCEEDED(args->get_Uri(&value)) && value) {
+            const std::string uri = TakeComString(value);
+            if (!uri.empty()) tab->adblock.FrameNavigating(uri);
+        }
+    } catch (...) {
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumDocumentNavigationHandler::Invoke(
+    ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) {
+    try {
+        if (!args) return S_OK;
+        ZephiumTab *tab = FindTabById(m_tab_id);
+        if (!tab) return S_OK;
+        LPWSTR value = nullptr;
+        if (SUCCEEDED(args->get_Uri(&value)) && value) {
+            const std::string uri = TakeComString(value);
+            if (!uri.empty()) tab->adblock.BeginDocument(uri);
+        }
+    } catch (...) {
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumSourceChangedHandler::Invoke(
+    ICoreWebView2 *sender, ICoreWebView2SourceChangedEventArgs *) {
+    try {
+        if (!sender) return S_OK;
+        ZephiumTab *tab = FindTabById(m_tab_id);
+        if (!tab) return S_OK;
+        /* The event args only carry IsNewDocument; the committed URL comes from
+         * the sender (a history navigation or an in-page document change). */
+        LPWSTR value = nullptr;
+        if (SUCCEEDED(sender->get_Source(&value)) && value) {
+            const std::string url = TakeComString(value);
+            if (!url.empty()) tab->adblock.SetDocumentUrl(url);
+        }
+    } catch (...) {
+    }
+    return S_OK;
+}
+
+/* Installs the request filter and the document/iframe bookkeeping for one tab.
+ * Called for every CoreWebView2 the shell creates (new tab and wake-up), and the
+ * filter must be added before the first navigation so the first page is covered. */
+static void AttachAdblockToTab(ZephiumTab *tab) {
+    if (!tab || !tab->view || !zephium_adblock_is_enabled()) return;
+    tab->adblock.Clear();
+    if (!tab->url.empty()) tab->adblock.SetDocumentUrl(WideToUtf8(tab->url));
+
+    HRESULT hr = tab->view->AddWebResourceRequestedFilter(
+        L"*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+    if (FAILED(hr)) {
+        Log(L"adblock: AddWebResourceRequestedFilter failed for tab id=%d (0x%08lx)",
+            tab->id, (unsigned long)hr);
         return;
     }
+    /* add_* takes its own reference to each handler; the constructor reference is
+     * dropped right away so no handler outlives the webview that owns it. */
+    EventRegistrationToken token = {};
+    ZephiumWebResourceHandler *resource_handler = new ZephiumWebResourceHandler(tab->id);
+    tab->view->add_WebResourceRequested(resource_handler, &token);
+    resource_handler->Release();
+    ZephiumDocumentNavigationHandler *navigation_handler =
+        new ZephiumDocumentNavigationHandler(tab->id);
+    tab->view->add_NavigationStarting(navigation_handler, &token);
+    navigation_handler->Release();
+    ZephiumSourceChangedHandler *source_handler = new ZephiumSourceChangedHandler(tab->id);
+    tab->view->add_SourceChanged(source_handler, &token);
+    source_handler->Release();
 
-    int requested = 0;
-    do {
-        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
-        if (wcscmp(entry.cFileName, L".") == 0 || wcscmp(entry.cFileName, L"..") == 0) continue;
-
-        std::wstring folder = root + L"\\" + entry.cFileName;
-        if (GetFileAttributesW((folder + L"\\manifest.json").c_str()) == INVALID_FILE_ATTRIBUTES) {
-            Log(L"extension skipped (no manifest.json): %ls", entry.cFileName);
-            continue;
-        }
-        hr = profile7->AddBrowserExtension(folder.c_str(),
-                                           new ZephiumExtensionHandler(entry.cFileName));
-        Log(L"extension add requested: %ls (0x%08lx)", entry.cFileName, (unsigned long)hr);
-        ++requested;
-    } while (FindNextFileW(find, &entry));
-    FindClose(find);
-    profile7->Release();
-    Log(L"extensions: %d folder(s) requested", requested);
+    ICoreWebView2_4 *view4 = nullptr;
+    if (SUCCEEDED(tab->view->QueryInterface(IID_ICoreWebView2_4, (void **)&view4)) && view4) {
+        EventRegistrationToken frame_token = {};
+        ZephiumFrameCreatedHandler *frame_handler = new ZephiumFrameCreatedHandler(tab->id);
+        view4->add_FrameCreated(frame_handler, &frame_token);
+        frame_handler->Release();
+        view4->Release();
+    } else {
+        Log(L"adblock: ICoreWebView2_4 missing; iframe documents are filtered as documents");
+    }
+    Log(L"adblock: request filtering installed for tab id=%d", tab->id);
 }
 
 /* ------------------------------------------------------------- tab control */
@@ -848,6 +1167,9 @@ static void SleepTab(int index) {
         }
     }
     tab->sleeping = true;
+    /* The webview is gone; drop the iframe/document bookkeeping with it (it is
+     * rebuilt from the restored URL when the tab wakes). */
+    tab->adblock.Clear();
     tab->ctrl->Close();
     tab->ctrl->Release();
     tab->ctrl = nullptr;
@@ -1002,9 +1324,6 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
         return S_OK;
     }
 
-    /* First tab only: the profile is shared, so the extensions are added once. */
-    LoadBrowserExtensions(tab->view);
-
     ICoreWebView2Settings *settings = nullptr;
     if (SUCCEEDED(tab->view->get_Settings(&settings)) && settings) {
         settings->put_IsStatusBarEnabled(FALSE);
@@ -1030,6 +1349,10 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
     } else {
         Log(L"ICoreWebView2_4 unavailable; downloads are not intercepted");
     }
+
+    /* Install the request filter before the first Navigate() so the very first
+     * page (and its subresources) is already covered. */
+    AttachAdblockToTab(tab);
 
     const int index = (int)(std::find(g_tabs.begin(), g_tabs.end(), tab) - g_tabs.begin());
     zephium_tab_t *core_tab = g_core ? zephium_browser_get_tab(g_core, (size_t)index) : nullptr;
@@ -1259,6 +1582,12 @@ HRESULT STDMETHODCALLTYPE ZephiumDownloadStateHandler::Invoke(ICoreWebView2Downl
 /* ------------------------------------------------------------- window proc */
 static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
+    case ZEPHIUM_ADBLOCK_WM_REFRESH:
+        /* Posted by the filter-list download thread; the engine build has to run
+         * on this UI thread (adblock-rust handles are thread affine). */
+        zephium_adblock_on_build_message(wparam);
+        return 0;
+
     case WM_CREATE: {
         g_hwnd = hwnd;
         HINSTANCE inst = ((LPCREATESTRUCTW)lparam)->hInstance;
@@ -1360,6 +1689,8 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         if (wparam == ZEPHIUM_TIMER_ID) {
             SyncActiveView();
             CheckHibernation();
+            /* Daily filter refresh + the periodic ad-block stats line. */
+            zephium_adblock_tick();
         }
         return 0;
 
@@ -1437,17 +1768,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     Log(L"---- Zephium Windows shell starting ----");
     RestrictFileToOwner(g_log_path);
 
-    /* Ad blocking is on unless the environment or the command line turns it off;
-     * the switch only controls whether the extension folders are loaded. */
+    /* Ad blocking is on unless the environment or the command line turns it off.
+     * The switch only controls the native filter engine; browsing never depends
+     * on it. */
     const wchar_t *adblock_env = _wgetenv(L"ZEPHIUM_ADBLOCK");
-    if (adblock_env && wcscmp(adblock_env, L"0") == 0) g_extensions_enabled = false;
+    if (adblock_env && wcscmp(adblock_env, L"0") == 0) g_adblock_enabled = false;
 
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring initial = L"https://duckduckgo.com";
     for (int i = 1; argv && i < argc; ++i) {
         if (wcscmp(argv[i], L"--no-adblock") == 0) {
-            g_extensions_enabled = false;
+            g_adblock_enabled = false;
         } else if (wcscmp(argv[i], L"--tab-sleep") == 0 && i + 1 < argc) {
             g_sleep_seconds = _wtoi(argv[++i]) * 60;
             if (g_sleep_seconds < 0) g_sleep_seconds = 0;
@@ -1461,8 +1793,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     if (argv) LocalFree(argv);
     g_initial_url = initial;
     Log(L"tab hibernation: %d seconds (0 = off)", g_sleep_seconds);
-    Log(L"ad blocking: %ls", g_extensions_enabled ? L"enabled (browser extensions)"
-                                                  : L"disabled (--no-adblock / ZEPHIUM_ADBLOCK=0)");
+    Log(L"ad blocking: %ls", g_adblock_enabled ? L"enabled (native network filtering, adblock-rust)"
+                                              : L"disabled (--no-adblock / ZEPHIUM_ADBLOCK=0)");
 
     std::string db_path = WideToUtf8(g_exe_dir + L"\\zephium_profile.db");
     g_core = zephium_browser_init(db_path.c_str());
@@ -1503,6 +1835,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
+
+    /* Native ad blocking lives on the UI thread (adblock-rust handles are thread
+     * affine).  Warm start loads a compiled engine cache in milliseconds; a
+     * first run with cached lists takes ~1s; with no lists this returns at once
+     * and the filter lists are downloaded in the background, so browsing never
+     * waits for the network. */
+    {
+        ZephiumAdblockConfig adblock;
+        adblock.hwnd = hwnd;
+        adblock.exe_dir = g_exe_dir;
+        adblock.enabled = g_adblock_enabled;
+        adblock.logger = AdblockLogLine;
+        zephium_adblock_start(adblock);
+    }
 
     HMODULE loader = LoadLibraryW(L"WebView2Loader.dll");
     if (!loader) {
@@ -1547,7 +1893,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         }
     };
 
-    ZephiumEnvOptions *options = new ZephiumEnvOptions(ZEPHIUM_WEBVIEW2_ARGS, g_extensions_enabled);
+    ZephiumEnvOptions *options = new ZephiumEnvOptions(ZEPHIUM_WEBVIEW2_ARGS);
     HRESULT hr = create_env(nullptr, user_data.c_str(), options, new EnvHandler());
     options->Release();
     if (FAILED(hr)) {
@@ -1573,6 +1919,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         DispatchMessageW(&msg);
     }
 
+    /* Same thread as zephium_adblock_start(): stops the download thread, logs the
+     * final filtering stats and frees the engine handle. */
+    zephium_adblock_shutdown();
     if (g_env) g_env->Release();
     if (g_core) zephium_browser_free(g_core);
     CoUninitialize();

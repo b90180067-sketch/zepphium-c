@@ -41,12 +41,20 @@ cd C:\path\to\zephium-c\windows
 - Phím tắt: `Ctrl+T` tab mới · `Ctrl+W` đóng tab · `Ctrl+Tab`/`Ctrl+Shift+Tab` chuyển tab ·
   `Ctrl+L` focus ô địa chỉ · `F5` tải lại · `Ctrl++`/`Ctrl+-` zoom.
 - Log chẩn đoán: `windows\zephium_win.log` (dòng `tab N hibernated`, `tab N waking`, `navigate …`).
+- Chặn quảng cáo chạy **ở tầng mạng** (không extension): engine
+  [adblock-rust](https://github.com/brave/adblock-rust) kiểm tra từng request trong
+  `WebResourceRequested`. Bộ lọc (EasyList/EasyPrivacy/uBO) tải về lần đầu rồi cập nhật
+  mỗi 24h; cache engine nhị phân cho khởi động nóng ~8ms. Tắt bằng `--no-adblock` hoặc
+  `$env:ZEPHIUM_ADBLOCK='0'`. Chi tiết: [docs/ADBLOCK.md](docs/ADBLOCK.md).
 - Build lại từ source:
   ```powershell
   cd C:\path\to\zephium-c\windows
   powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
-  mingw32-make                                             # build exe + copy newtab/
+  powershell -ExecutionPolicy Bypass -File fetch_rust.ps1   # Rust (GNU) cho engine adblock (lần đầu)
+  mingw32-make                                             # build staticlib + exe + copy newtab/
   ```
+  Engine adblock là Rust: máy cần Rust `stable-x86_64-pc-windows-gnu` (script trên cài
+  giúp). `mingw32-make adblock-test` chạy unit test + benchmark của engine.
 
 ### Màn hình tab mới (ASCII start page)
 
@@ -102,13 +110,29 @@ Các cờ hữu ích:
 | `--screenshot <file> --screenshot-delay N` | chụp ảnh trang đang render rồi thoát |
 | `--headless` | REPL/CLI khi không có màn hình |
 | `--no-adblock` | tắt bộ lọc quảng cáo cho phiên chạy này |
+| `--adblock-status` | in trạng thái cache bộ lọc (version, rule, warm/cold) rồi thoát |
 
-**Ad blocking**: bộ lọc quảng cáo (doubleclick, google-analytics, facebook/tr) **bật mặc
-định**. Rule được sinh bởi module C17 `blocker`, biên dịch bất đồng bộ bằng
-`WebKitUserContentFilterStore` rồi gắn vào user-content-manager của **mọi tab**; log ghi
-`[ADBLOCK] Content filter active.`. Nếu WebKit không biên dịch được filter, browser chỉ ghi
-`[WARN] [ADBLOCK_FAILED] ...` và tiếp tục duyệt web không có filter. Tắt bằng cờ hoặc biến
-môi trường:
+**Ad blocking**: **bật mặc định**, chặn ở tầng mạng bằng content blocker của WebKit
+(chứ không phải extension). Bộ lọc là bản EasyList/EasyPrivacy/uBO đã chuyển đổi sang JSON
+lấy từ release [bnema/ublock-webkit-filters](https://github.com/bnema/ublock-webkit-filters)
+(**2 combined part = 246.880 rule**), tải về background rồi biên dịch bằng
+`WebKitUserContentFilterStore` và gắn vào user-content-manager của **mọi tab**:
+
+- lần chạy **đầu tiên**: 4 rule built-in của module C17 `blocker` chặn tạm trong lúc tải
+  ~40 MB JSON + biên dịch (~10–20 giây ở background, không chặn duyệt web); log
+  `[ADBLOCK] ... compile_ms=...`;
+- các lần sau: filter đã biên dịch được WebKit **load từ store** (~0.5 ms/filter, log
+  `cache hit ... (warm start)`), và version được kiểm tra lại sau khi cửa sổ hiện 3 giây
+  rồi mỗi **24h** — có bản mới thì tải/biên dịch/gắn lại rồi xoá filter cũ;
+- mọi lỗi (mạng, JSON hỏng, filter > 150k rule) → `[WARN] [ADBLOCK_FAILED] ...` và
+  **giữ bộ lọc đang dùng**, browsing không bị ảnh hưởng.
+
+`--adblock-status` in ra version/rule/cache hiện tại rồi thoát (exit 0 nếu cache dùng
+được, 2 nếu chưa). Cache nằm ở `$XDG_CACHE_HOME/zephium/adblock` (filter đã biên dịch
+trong `.../zephium/content-filters`); đổi bằng `ZEPHIUM_ADBLOCK_DIR`. Máy ít RAM có thể
+dùng `ZEPHIUM_ADBLOCK_MODE=lists` (4 list riêng, 243.989 rule, store ~81 MB thay vì
+~105 MB). Nếu thiếu `libsoup-3.0-dev` thì shell vẫn build/chạy nhưng không tự cập nhật
+danh sách. Tắt bằng cờ hoặc biến môi trường:
 
 ```bash
 ZEPHIUM_ADBLOCK=0 ./run_wsl.sh https://duckduckgo.com
@@ -148,6 +172,10 @@ Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zeph
 | WSL chậm, tụt FPS | Kiểm tra `ls /dev/dri`: không có `renderD128` thì đang render bằng CPU — xem mục **Hiệu năng** |
 | WSL: WebKit không khởi động, log có lỗi `bwrap` / sandbox | Kernel thiếu unprivileged user namespace: chạy `ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh <url>` (sandbox tắt, có cảnh báo `[SANDBOX]`) |
 | Adblock không chặn (log có `[ADBLOCK_FAILED]`) | Xem thông báo lỗi ngay sau đó; tắt hẳn bằng `ZEPHIUM_ADBLOCK=0` nếu filter làm chậm trang |
+| Windows: log ghi `adblock: engine unavailable` | Chưa tải được danh sách (mạng/proxy); kiểm tra `%LOCALAPPDATA%\Zephium\adblock\lists` |
+| Windows: build lỗi thiếu `WaitOnAddress` khi link | Thiếu `-lsynchronization` trong `windows/Makefile` |
+| GTK: cần xoá cache bộ lọc / tải lại từ đầu | Xoá `$XDG_CACHE_HOME/zephium/adblock` và `$XDG_CACHE_HOME/zephium/content-filters` rồi chạy lại (hoặc đặt `ZEPHIUM_ADBLOCK_DIR`) |
+| GTK: lần đầu chậm / RAM tăng ~550 MB khi biên dịch | Bình thường: WebKit đang biên dịch 246.880 rule ở background; có thể dùng `ZEPHIUM_ADBLOCK_MODE=lists` để giảm |
 
 ---
 
@@ -155,7 +183,11 @@ Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zeph
 
 ```
 zephium-c/
-├── blocker/            # WebKit Content Filter (Adblock/Tracker blocker) + PCRE2 regex
+├── blocker/            # Ad blocking: C17 rules → WebKit content-filter JSON, bộ lọc tải về
+│   │                   #   (filters.c = manifest/cache/JSON, portable, có unit test)
+│   ├── adblock_ffi.h   #   C ABI của engine Rust cho shell Windows (đóng băng)
+│   ├── filters.c/h     #   cache bộ lọc WebKit: manifest, staleness 24h, validate JSON
+│   └── rust/           #   adblock-rust 0.13.6 → staticlib (Rust, MPL-2.0)
 ├── browser_core/       # Core browser state (Tabs, Omnibox, Zoom, SQLite store)
 ├── geometry/           # Point, Size, Rect tính toán giao diện
 ├── ids/                # 128-bit ULID Crockford-32 định danh Tabs/Windows
@@ -171,9 +203,13 @@ zephium-c/
 │   └── fonts/          #   Paper Mono (OFL) từ bộ ascii.rest
 ├── windows/            # Shell native Windows (Win32 + WebView2): multi-tab, tab ngủ đông
 │   ├── zephium_win.cpp #   host window + toolbar + tab strip (C++17, COM)
-│   ├── Makefile        #   build bằng mingw32-make
+│   ├── adblock_webview2.cpp/h #  WebResourceRequested + engine lifecycle + tải bộ lọc
+│   ├── adblock_selftest.cpp   #  self test console: mapping, FFI, cache, benchmark 140k rule
+│   ├── Makefile        #   build bằng mingw32-make (gồm cargo build staticlib)
 │   ├── fetch_sdk.ps1   #   tải WebView2 SDK vào windows/sdk (không commit)
+│   ├── fetch_rust.ps1  #   cài Rust GNU toolchain cho engine adblock (không commit)
 │   └── (zephium_win.exe, WebView2Loader.dll: build output, tải từ Releases)
+├── docs/ADBLOCK.md     # Kiến trúc, build, cấu hình và kiểm chứng ad blocking
 ├── main.c              # Entry point: Linux WebKitGTK 4.1 Shell + Cross-platform CLI REPL
 ├── read_log.py         # Đọc/chẩn đoán log WebKit + GStreamer + lỗi JS của trang
 ├── CMakeLists.txt      # Cấu hình build đa nền tảng (CMake 3.16+)
@@ -390,15 +426,28 @@ có sẵn trong Windows) và **dùng lại core C17** (zoom, navigation, store, 
 ```powershell
 cd windows
 powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
+powershell -ExecutionPolicy Bypass -File fetch_rust.ps1   # Rust GNU cho engine adblock (lần đầu)
 mingw32-make
 .\zephium_win.exe https://grokipedia.com
 ```
+
+> Người dùng chỉ **chạy** thì không cần Rust/WebView2 SDK: engine adblock được liên kết
+> **tĩnh** vào `zephium_win.exe` (thêm ~9 MB), nên artifact vẫn chỉ là
+> `zephium_win.exe` + `WebView2Loader.dll`. Rust chỉ cần khi **build**.
 
 Có **multi-tab** (thanh tab tự vẽ, nút `×`, nút `+`) và **tab ngủ đông**: tab nhàn rỗi
 quá `--tab-sleep` phút sẽ bị huỷ webview (giữ URL/tiêu đề), bấm lại thì nạp lại; tab đang
 active hoặc đang phát audio thì không bao giờ bị ngủ. Đo trên 4 tab nhẹ: 196 MB → 119 MB.
 
 Chi tiết (yêu cầu, kiến trúc, phím tắt, giới hạn): [windows/README.md](windows/README.md).
+
+**Chặn quảng cáo (native, tầng mạng)**: mỗi tab đăng ký `WebResourceRequested` với
+`COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL`; handler gọi engine adblock-rust
+(`blocker/adblock_ffi.h`) và trả 204 rỗng cho request bị chặn, hoặc body thay thế cho rule
+`$redirect`. Bộ lọc EasyList/EasyPrivacy/uBO (≈154k rule) tải về worker thread, cache engine
+nhị phân trong `%LOCALAPPDATA%\Zephium\adblock\`, cập nhật mỗi 24h. Chi tiết đầy đủ, số đo
+hiệu năng và **giới hạn** (WebSocket không có event, `$removeparam`, `$csp`, cosmetic):
+[docs/ADBLOCK.md](docs/ADBLOCK.md).
 
 **Popup, tải file, quyền**: `target="_blank"`/`window.open` mở thành tab mới (URL vẫn phải
 qua `zephium_nav_is_allowed`, giống ô địa chỉ); file tải về thư mục **Downloads** của user
@@ -419,3 +468,10 @@ Trong môi trường phát triển hiện tại chỉ **compile** được shell
 quyền). Vì vậy **chưa có bằng chứng runtime** cho: popup mở tab + kiểm tra allow-list, tên
 file tải về + bản ghi trong bảng `downloads`, và việc từ chối permission. Phần Linux/WSL
 (§2, §3) thì đã được chạy và chụp ảnh kiểm chứng.
+
+Riêng **ad blocking trên Windows** thì phần lõi đã được **chạy thật** (không chỉ compile):
+`cargo test` cho engine, và `windows/adblock_selftest.exe` link staticlib rồi kiểm tra
+block/allow/`$redirect`, cache nhị phân, chống panic và benchmark 140k rule trên chính máy
+build. Phần **chưa** chạy là lớp COM `WebResourceRequested` (cần mở cửa sổ WebView2 thật):
+việc chặn request hiển thị trên trang, `$redirect` hiển thị đúng, và tải bộ lọc trên máy
+có proxy/firewall lạ.

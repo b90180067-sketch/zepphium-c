@@ -54,6 +54,7 @@ set(ZEPHIUM_SOURCES
     ids/port.c
     navigation/port.c
     blocker/port.c
+    blocker/filters.c
     store/port.c
     browser_core/port.c
 )
@@ -126,6 +127,24 @@ if (UNIX AND NOT APPLE)
         target_compile_options(zephium PRIVATE ${WEBKIT_CFLAGS_OTHER})
         target_link_directories(zephium PRIVATE ${WEBKIT_LIBRARY_DIRS})
         target_link_libraries(zephium PRIVATE ${WEBKIT_LIBRARIES} m pthread)
+
+        # libsoup-3.0 (shipped side by side with WebKitGTK 4.1) downloads the
+        # filter lists in the background. Without it the shell still compiles
+        # already-cached JSON and keeps the built-in fallback rules, but it can
+        # never refresh them.
+        if (PkgConfig_FOUND)
+            pkg_check_modules(SOUP3 QUIET libsoup-3.0)
+        endif()
+        if (SOUP3_FOUND)
+            message(STATUS "Found libsoup-3.0 ${SOUP3_VERSION}: enabling adblock filter downloads")
+            target_compile_definitions(zephium PRIVATE ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER=1)
+            target_include_directories(zephium PRIVATE ${SOUP3_INCLUDE_DIRS})
+            target_compile_options(zephium PRIVATE ${SOUP3_CFLAGS_OTHER})
+            target_link_directories(zephium PRIVATE ${SOUP3_LIBRARY_DIRS})
+            target_link_libraries(zephium PRIVATE ${SOUP3_LIBRARIES})
+        else()
+            message(STATUS "libsoup-3.0 not found: adblock filter downloads disabled")
+        endif()
     else()
         message(STATUS "WebKitGTK not found: building standalone headless/CLI core")
         target_link_libraries(zephium PRIVATE m pthread)
@@ -134,6 +153,22 @@ endif()
 
 # Tests
 enable_testing()
+
+# The portable adblock filter cache (manifest parsing, staleness, JSON
+# validation, cache paths and store identifiers) is host independent, so it is
+# tested on every platform, not only where WebKitGTK exists.
+add_executable(filters_test
+    blocker/filters.c
+    blocker/harness/filters_test.c
+)
+target_include_directories(filters_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME zephium_filters_test COMMAND filters_test)
+set_tests_properties(zephium_filters_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
 add_test(NAME zephium_batch_test COMMAND zephium --batch)
 set_tests_properties(zephium_batch_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"

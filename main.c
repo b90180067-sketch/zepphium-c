@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include "browser_core/port.h"
+#include "blocker/filters.h"
 
 #if defined(__linux__)
 #include <unistd.h>
@@ -241,10 +242,190 @@ static void apply_wsl_optimizations(bool force_wsl, bool disable_gpu, bool force
 #endif
 }
 
+/* ---------------------------------------------------------------------------
+ * Ad blocking: shell-independent cache inspection (--adblock-status)
+ *
+ * The GTK shell below owns the WebKit side; these helpers only resolve the cache
+ * location and read the small manifest/stamp text files, so the status command
+ * also works in the headless/CLI build. The layout and policy live in the
+ * portable blocker/filters module.
+ * ------------------------------------------------------------------------- */
+#define ZEPHIUM_ADBLOCK_MANIFEST_READ_CAP (1024u * 1024u)
+
+/* ZEPHIUM_ADBLOCK_DIR overrides the whole cache directory; otherwise it lives
+ * under the XDG cache dir. Ad blocking never writes anywhere else. */
+static bool adblock_cache_directory(char *out, size_t out_cap) {
+    if (!out || out_cap == 0) return false;
+    const char *override = getenv("ZEPHIUM_ADBLOCK_DIR");
+    if (override && *override) return zephium_strcpy_safe(out, out_cap, override) == 0;
+
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    char fallback[ZEPHIUM_FILTERS_PATH_CAP];
+    if (!xdg || !*xdg) {
+        const char *home = getenv("HOME");
+        if (!home || !*home) return false;
+        int written = snprintf(fallback, sizeof(fallback), "%s/.cache", home);
+        if (written <= 0 || (size_t)written >= sizeof(fallback)) return false;
+        xdg = fallback;
+    }
+    int written = snprintf(out, out_cap, "%s/zephium/adblock", xdg);
+    return written > 0 && (size_t)written < out_cap;
+}
+
+static bool adblock_read_file(const char *path, char *buffer, size_t cap, size_t *out_len) {
+    if (!path || !buffer || cap < 2) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t read_bytes = fread(buffer, 1, cap - 1, file);
+    bool too_big = !feof(file);
+    (void)fclose(file);
+    if (too_big) return false;
+    buffer[read_bytes] = '\0';
+    if (out_len) *out_len = read_bytes;
+    return true;
+}
+
+/* Small helper so the status output can say whether a cache file is present. */
+static bool adblock_file_present(const char *path, long *out_size) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    bool present = fseek(file, 0, SEEK_END) == 0;
+    long size = present ? ftell(file) : 0;
+    (void)fclose(file);
+    if (present && size > 0) {
+        if (out_size) *out_size = size;
+        return true;
+    }
+    return false;
+}
+
+/* Prints the cached filter-list state and exits: this is the offline way to see
+ * which release would be used, and what a refresh would download. */
+static int run_adblock_status(void) {
+    char cache_dir[ZEPHIUM_FILTERS_PATH_CAP];
+    if (!adblock_cache_directory(cache_dir, sizeof(cache_dir))) {
+        fprintf(stderr, "adblock: cannot resolve the filter cache directory\n");
+        return 1;
+    }
+    printf("Adblock filter cache: %s\n", cache_dir);
+    const char *disabled_env = getenv("ZEPHIUM_ADBLOCK");
+    printf("Enabled: %s\n",
+           (disabled_env && strcmp(disabled_env, "0") == 0)
+               ? "no (ZEPHIUM_ADBLOCK=0)"
+               : "yes unless ZEPHIUM_ADBLOCK=0 or --no-adblock");
+
+    char manifest_path[ZEPHIUM_FILTERS_PATH_CAP];
+    char stamp_path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_manifest_path(manifest_path, sizeof(manifest_path), cache_dir) == 0 ||
+        zephium_filters_stamp_path(stamp_path, sizeof(stamp_path), cache_dir) == 0) {
+        fprintf(stderr, "adblock: cache path too long\n");
+        return 1;
+    }
+
+    zephium_filter_manifest_t manifest;
+    zephium_filters_manifest_init(&manifest);
+    bool have_manifest = false;
+    char *text = (char *)malloc(ZEPHIUM_ADBLOCK_MANIFEST_READ_CAP);
+    if (text) {
+        size_t text_len = 0;
+        if (adblock_read_file(manifest_path, text, ZEPHIUM_ADBLOCK_MANIFEST_READ_CAP, &text_len)) {
+            have_manifest = zephium_filters_manifest_parse(text, text_len, &manifest);
+        }
+        free(text);
+    }
+    if (have_manifest) {
+        printf("Manifest: version=%s declared_rules=%llu combined=%zu lists=%zu\n",
+               manifest.version, (unsigned long long)manifest.declared_total_rules,
+               manifest.combined_count, manifest.list_count);
+    } else {
+        printf("Manifest: missing or unreadable (%s)\n", manifest_path);
+    }
+
+    zephium_filter_file_t files[ZEPHIUM_FILTERS_MAX_FILTERS];
+    size_t file_count = 0;
+    const char *mode = "combined";
+    if (have_manifest) {
+        bool prefer_combined = true;
+        const char *override = getenv("ZEPHIUM_ADBLOCK_MODE");
+        if (override && strcmp(override, "lists") == 0) {
+            prefer_combined = false;
+            mode = "lists";
+        }
+        file_count = zephium_filters_select(&manifest, prefer_combined, files,
+                                            ZEPHIUM_FILTERS_MAX_FILTERS);
+    }
+
+    zephium_filters_cache_state_t state;
+    memset(&state, 0, sizeof(state));
+    char cached_version[ZEPHIUM_FILTERS_VERSION_CAP];
+    cached_version[0] = '\0';
+    char stamp_text[512];
+    size_t stamp_len = 0;
+    if (adblock_read_file(stamp_path, stamp_text, sizeof(stamp_text), &stamp_len)) {
+        uint64_t declared = 0;
+        int64_t fetched_at = 0;
+        if (zephium_filters_stamp_parse(stamp_text, stamp_len, cached_version,
+                                        sizeof(cached_version), &declared, &fetched_at)) {
+            state.stamp_present = true;
+            state.stamp_fetched_at = fetched_at;
+            int64_t age = (int64_t)time(NULL) - fetched_at;
+            printf("Stamp: version=%s fetched_at=%lld age_h=%lld\n", cached_version,
+                   (long long)fetched_at, (long long)(age / 3600));
+        }
+    }
+    if (!state.stamp_present) printf("Stamp: missing (%s)\n", stamp_path);
+
+    if (have_manifest && state.stamp_present && strcmp(cached_version, manifest.version) == 0) {
+        state.manifest_present = true;
+        bool all_present = file_count > 0;
+        for (size_t i = 0; i < file_count; ++i) {
+            char path[ZEPHIUM_FILTERS_PATH_CAP];
+            long size = 0;
+            bool present = zephium_filters_list_path(path, sizeof(path), cache_dir,
+                                                     cached_version, files[i].file) != 0 &&
+                           adblock_file_present(path, &size);
+            printf("File: %s declared_rules=%u cached=%s\n", files[i].file,
+                   files[i].rules_count, present ? "yes" : "no");
+            if (!present) all_present = false;
+        }
+        state.lists_complete = all_present;
+    }
+    if (file_count == 0) {
+        printf("Selection: none (no usable cached manifest)\n");
+    } else if (mode[0] == 'c') {
+        printf("Selection: %zu filter file(s), mode=combined (per-file rule counts are "
+               "estimates of the published total)\n", file_count);
+    } else {
+        printf("Selection: %zu filter file(s), mode=lists\n", file_count);
+    }
+
+    bool complete = zephium_filters_cache_is_complete(&state);
+    bool reusable = zephium_filters_cache_can_reuse(&state, (int64_t)time(NULL));
+    printf("Cache: complete=%s reusable=%s\n", complete ? "yes" : "no",
+           reusable ? "yes (warm start, no download)" : "no (a refresh is due)");
+    if (complete && cached_version[0] != '\0') {
+        printf("Store identifiers:");
+        for (size_t i = 0; i < file_count; ++i) {
+            char identifier[ZEPHIUM_FILTERS_IDENTIFIER_CAP];
+            if (zephium_filters_store_identifier(files[i].file, cached_version, identifier,
+                                                 sizeof(identifier)) > 0) {
+                printf(" %s", identifier);
+            }
+        }
+        printf("\n");
+    }
+    return complete ? 0 : 2;
+}
+
 #if defined(__linux__) && defined(ZEPHIUM_ENABLE_WEBKITGTK)
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
+#include <glib/gstdio.h>
 #include <webkit2/webkit2.h>
+
+#if defined(ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER)
+#include <libsoup/soup.h>
+#endif
 
 typedef struct {
     GtkWidget *window;
@@ -258,7 +439,6 @@ typedef struct {
     GtkWidget *find_entry;
     GtkWidget *lbl_find;
     zephium_browser_context_t *core;
-    WebKitUserContentFilter *adblock_filter;
     bool disable_gpu;
     bool is_wsl;
     const char *screenshot_path;
@@ -407,14 +587,51 @@ static void install_page_diagnostics(WebKitUserContentManager *ucm) {
  *
  * The portable blocker module emits WebKit content-blocker JSON; WebKit needs it
  * compiled into a binary filter, which it does asynchronously in the UI process.
- * Tabs that already exist when the compilation finishes (the first one always
- * does) receive the filter through adblock_apply_to_tabs(). Any failure - rules
- * that do not compile, an unwritable store directory - only costs ad blocking:
- * pages keep loading.
+ * With downloadable filter lists the shell:
+ *
+ *   1. compiles the tiny built-in rule set immediately, so a first run (offline
+ *      or before the first refresh) still blocks the worst ad hosts;
+ *   2. loads the cached release from WebKitUserContentFilterStore by its
+ *      versioned identifier (warm start: ~1ms per filter, no network, no
+ *      compile), and recompiles the cached JSON from disk if the store entry is
+ *      missing;
+ *   3. asks the upstream manifest for a new release shortly after the first
+ *      paint and then once a day, and downloads + compiles a new release in the
+ *      background.
+ *
+ * Every failure path only costs ad blocking: pages keep loading with whatever
+ * filter (or none) is currently active. The filter list JSON never sits in
+ * memory as a whole: it is streamed to a cache file in 64KiB chunks, validated
+ * by streaming, and handed to WebKit as a file.
  * ------------------------------------------------------------------------- */
-#define ZEPHIUM_ADBLOCK_STORE_IDENTIFIER "zephium-adblock"
+#define ZEPHIUM_ADBLOCK_LEGACY_STORE_IDENTIFIER "zephium-adblock"
+#define ZEPHIUM_ADBLOCK_MANIFEST_FILE "manifest.json"
+#define ZEPHIUM_ADBLOCK_MANIFEST_MAX_BYTES (4u * 1024u * 1024u)
+#define ZEPHIUM_ADBLOCK_LIST_MAX_BYTES (64u * 1024u * 1024u)
+#define ZEPHIUM_ADBLOCK_STARTUP_CHECK_SECONDS 3u
+#define ZEPHIUM_ADBLOCK_REFRESH_SECONDS 86400u
+#define ZEPHIUM_ADBLOCK_URL_BASE_DEFAULT \
+    "https://github.com/bnema/ublock-webkit-filters/releases/latest/download/"
+#define ZEPHIUM_ADBLOCK_USER_AGENT "Zephium/1.0.5"
 
 static WebKitUserContentFilterStore *g_adblock_store = NULL;
+/* Active compiled filters, applied to every tab (owned references). */
+static GPtrArray *g_adblock_filters = NULL;
+static bool g_adblock_enabled = false;
+static char g_adblock_cache_dir[ZEPHIUM_FILTERS_PATH_CAP];
+static char g_adblock_version[ZEPHIUM_FILTERS_VERSION_CAP];
+/* Last parsed manifest plus the files selected from it (warm start / refresh). */
+static zephium_filter_manifest_t g_adblock_manifest;
+static zephium_filter_file_t g_adblock_selection[ZEPHIUM_FILTERS_MAX_FILTERS];
+static size_t g_adblock_selection_count = 0;
+/* A compile job owns WebKit's background compilation queue while it runs; the
+ * refresh path must not start a second identical job. */
+static bool g_adblock_compile_in_flight = false;
+static guint g_adblock_periodic_timer = 0;
+#if defined(ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER)
+static SoupSession *g_adblock_soup = NULL;
+static bool g_adblock_refreshing = false;
+#endif
 
 static bool zephium_adblock_enabled(bool cli_disabled) {
     if (cli_disabled) return false;
@@ -422,27 +639,1054 @@ static bool zephium_adblock_enabled(bool cli_disabled) {
     return !(value && strcmp(value, "0") == 0);
 }
 
-/* Give the compiled filter to every tab that already exists. remove_all_filters()
- * keeps exactly one copy, including in tabs that were created after the filter
- * became available. */
-static void adblock_apply_to_tabs(WebKitUserContentFilter *filter) {
-    if (!filter || !g_app.notebook) return;
+/* ZEPHIUM_ADBLOCK_MODE=lists trades the two combined parts for the individual
+ * lists. Both are valid WebKit filters; the combined parts carry more rules and
+ * take longer to compile, so the mode is also a useful slow-host fallback. */
+static bool adblock_prefer_combined(void) {
+    const char *mode = getenv("ZEPHIUM_ADBLOCK_MODE");
+    return !(mode && strcmp(mode, "lists") == 0);
+}
+
+static int64_t adblock_now_seconds(void) {
+    return (int64_t)(g_get_real_time() / G_USEC_PER_SEC);
+}
+
+static const char *adblock_basename(const char *path) {
+    if (!path) return "?";
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+/* File name only: never log the whole cache path (it contains the user name). */
+static const char *adblock_redacted_name(const char *path) {
+    return adblock_basename(path);
+}
+
+/* Give the compiled filters to every tab that already exists. remove_all_filters()
+ * keeps exactly one copy of the set, including in tabs created later. */
+static void adblock_apply_to_tabs(void) {
+    if (!g_adblock_filters || g_adblock_filters->len == 0 || !g_app.notebook) return;
     gint pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(g_app.notebook));
     for (gint i = 0; i < pages; ++i) {
         GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(g_app.notebook), i);
         if (!page || !WEBKIT_IS_WEB_VIEW(page)) continue;
-        WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(page));
+        WebKitUserContentManager *ucm =
+            webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(page));
         if (!ucm) continue;
         webkit_user_content_manager_remove_all_filters(ucm);
-        webkit_user_content_manager_add_filter(ucm, filter);
+        for (guint f = 0; f < g_adblock_filters->len; ++f) {
+            webkit_user_content_manager_add_filter(
+                ucm, (WebKitUserContentFilter *)g_ptr_array_index(g_adblock_filters, f));
+        }
     }
 }
 
+/* Writes data to path through a sibling ".part" file and a rename, so a crash
+ * never leaves a half-written manifest/stamp for the next start to trust. */
+static bool adblock_write_file_atomic(const char *path, const char *data, size_t len) {
+    if (!path || !data) return false;
+    char tmp_path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_tmp_path(tmp_path, sizeof(tmp_path), path) == 0) return false;
+
+    GError *error = NULL;
+    if (!g_file_set_contents(tmp_path, data, (gssize)len, &error)) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot write %s (%s); continuing without updating the cache.",
+                    adblock_redacted_name(path), error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        return false;
+    }
+    GFile *source = g_file_new_for_path(tmp_path);
+    GFile *dest = g_file_new_for_path(path);
+    bool moved = g_file_move(source, dest, G_FILE_COPY_OVERWRITE, NULL, NULL, NULL, &error);
+    g_object_unref(source);
+    g_object_unref(dest);
+    if (!moved) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot replace %s (%s).",
+                    adblock_redacted_name(path), error ? error->message : "rename failed");
+        if (error) g_error_free(error);
+        (void)g_remove(tmp_path);
+    }
+    return moved;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Compile jobs: store load() first, cached JSON save_from_file() second      */
+/* ------------------------------------------------------------------------- */
+
+typedef struct {
+    char version[ZEPHIUM_FILTERS_VERSION_CAP];
+    zephium_filter_file_t files[ZEPHIUM_FILTERS_MAX_FILTERS];
+    size_t file_count;
+    char *manifest_text;    /* owned copy of the downloaded manifest, or NULL */
+    size_t manifest_len;
+    uint64_t declared_total_rules;
+    guint32 rules_total;
+    bool persist;           /* a fresh release was downloaded: commit the cache */
+    guint pending;
+    guint loaded;
+    guint recompiled;
+    guint failed;
+    gint64 start_us;
+    GPtrArray *filters;     /* collected WebKitUserContentFilter*, owned */
+} adblock_job_t;
+
+typedef struct {
+    adblock_job_t *job;
+    size_t index;
+    GFile *source_file;
+} adblock_file_ctx_t;
+
+static void adblock_job_finish(adblock_job_t *job);
+static void adblock_sweep_store(const char *version, const zephium_filter_file_t *files,
+                                size_t count);
+static void adblock_cleanup_old_versions(void);
+
+static void adblock_job_free(adblock_job_t *job) {
+    if (!job) return;
+    if (job->filters) g_ptr_array_unref(job->filters);
+    g_free(job->manifest_text);
+    g_free(job);
+}
+
+static void adblock_job_maybe_finish(adblock_job_t *job) {
+    if (!job || job->pending > 0) return;
+    adblock_job_finish(job);
+}
+
+static void adblock_ctx_done(adblock_file_ctx_t *ctx) {
+    if (!ctx) return;
+    adblock_job_t *job = ctx->job;
+    if (ctx->source_file) g_object_unref(ctx->source_file);
+    g_free(ctx);
+    if (job->pending > 0) --job->pending;
+    adblock_job_maybe_finish(job);
+}
+
+/* The filter is not in the store yet (or its binary cache was removed): compile
+ * the cached JSON file. This is still a warm start - no network involved. */
+static void adblock_on_filter_save(GObject *source, GAsyncResult *result, gpointer user_data) {
+    adblock_file_ctx_t *ctx = (adblock_file_ctx_t *)user_data;
+    GError *error = NULL;
+    WebKitUserContentFilter *filter = webkit_user_content_filter_store_save_from_file_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+    if (filter) {
+        g_ptr_array_add(ctx->job->filters, filter);
+        ++ctx->job->recompiled;
+        zephium_log("INFO", "ADBLOCK_COMPILE", "filter=%s source=cached-file rules~%u",
+                    ctx->job->files[ctx->index].file,
+                    ctx->job->files[ctx->index].rules_count);
+    } else {
+        ++ctx->job->failed;
+        zephium_log("WARN", "ADBLOCK_FAILED", "filter=%s did not compile (%s); keeping the other filters.",
+                    ctx->job->files[ctx->index].file, error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+    }
+    adblock_ctx_done(ctx);
+}
+
+static void adblock_on_filter_load(GObject *source, GAsyncResult *result, gpointer user_data) {
+    adblock_file_ctx_t *ctx = (adblock_file_ctx_t *)user_data;
+    GError *error = NULL;
+    WebKitUserContentFilter *filter = webkit_user_content_filter_store_load_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+    if (filter) {
+        g_ptr_array_add(ctx->job->filters, filter);
+        ++ctx->job->loaded;
+        zephium_log("INFO", "ADBLOCK_COMPILE", "filter=%s source=store rules~%u",
+                    ctx->job->files[ctx->index].file,
+                    ctx->job->files[ctx->index].rules_count);
+        adblock_ctx_done(ctx);
+        return;
+    }
+    /* A missing store entry is expected on the first run for this version. */
+    if (error) g_error_free(error);
+
+    char identifier[ZEPHIUM_FILTERS_IDENTIFIER_CAP];
+    if (zephium_filters_store_identifier(ctx->job->files[ctx->index].file, ctx->job->version,
+                                         identifier, sizeof(identifier)) == 0) {
+        ++ctx->job->failed;
+        adblock_ctx_done(ctx);
+        return;
+    }
+    char path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_list_path(path, sizeof(path), g_adblock_cache_dir, ctx->job->version,
+                                  ctx->job->files[ctx->index].file) == 0) {
+        ++ctx->job->failed;
+        adblock_ctx_done(ctx);
+        return;
+    }
+    ctx->source_file = g_file_new_for_path(path);
+    webkit_user_content_filter_store_save_from_file(g_adblock_store, identifier,
+                                                    ctx->source_file, NULL,
+                                                    adblock_on_filter_save, ctx);
+}
+
+static adblock_job_t *adblock_job_new(const char *version, const zephium_filter_file_t *files,
+                                     size_t count, guint32 rules_total,
+                                     uint64_t declared_total_rules, bool persist) {
+    if (!version || !files || count == 0 || count > ZEPHIUM_FILTERS_MAX_FILTERS) return NULL;
+    adblock_job_t *job = g_new0(adblock_job_t, 1);
+    if (zephium_strcpy_safe(job->version, sizeof(job->version), version) != 0) {
+        g_free(job);
+        return NULL;
+    }
+    for (size_t i = 0; i < count; ++i) job->files[i] = files[i];
+    job->file_count = count;
+    job->persist = persist;
+    job->declared_total_rules = declared_total_rules;
+    job->rules_total = rules_total;
+    if (job->rules_total == 0) {
+        uint64_t sum = 0;
+        for (size_t i = 0; i < count; ++i) sum += files[i].rules_count;
+        job->rules_total = sum > (uint64_t)UINT32_MAX ? UINT32_MAX : (guint32)sum;
+    }
+    job->filters = g_ptr_array_new_with_free_func(g_object_unref);
+    job->start_us = g_get_monotonic_time();
+    return job;
+}
+
+static void adblock_job_start(adblock_job_t *job) {
+    g_adblock_compile_in_flight = true;
+    for (size_t i = 0; i < job->file_count; ++i) {
+        char identifier[ZEPHIUM_FILTERS_IDENTIFIER_CAP];
+        if (zephium_filters_store_identifier(job->files[i].file, job->version, identifier,
+                                             sizeof(identifier)) == 0) {
+            ++job->failed;
+            continue;
+        }
+        adblock_file_ctx_t *ctx = g_new0(adblock_file_ctx_t, 1);
+        ctx->job = job;
+        ctx->index = i;
+        ++job->pending;
+        webkit_user_content_filter_store_load(g_adblock_store, identifier, NULL,
+                                              adblock_on_filter_load, ctx);
+    }
+    adblock_job_maybe_finish(job);
+}
+
+static void adblock_job_finish(adblock_job_t *job) {
+    g_adblock_compile_in_flight = false;
+    gint64 elapsed_ms = (g_get_monotonic_time() - job->start_us) / 1000;
+
+    if (job->filters && job->filters->len > 0) {
+        if (g_adblock_filters) g_ptr_array_unref(g_adblock_filters);
+        g_adblock_filters = job->filters;
+        job->filters = NULL;
+        (void)zephium_strcpy_safe(g_adblock_version, sizeof(g_adblock_version), job->version);
+        adblock_apply_to_tabs();
+        zephium_log("INFO", "ADBLOCK",
+                    "version=%s filters=%u rules=%u loaded_from_store=%u recompiled=%u failed=%u compile_ms=%lld mode=%s",
+                    job->version, g_adblock_filters->len, job->rules_total, job->loaded,
+                    job->recompiled, job->failed, (long long)elapsed_ms,
+                    adblock_prefer_combined() ? "combined" : "lists");
+        if (job->persist) {
+            char manifest_path[ZEPHIUM_FILTERS_PATH_CAP];
+            char stamp_path[ZEPHIUM_FILTERS_PATH_CAP];
+            char stamp[256];
+            bool ok = zephium_filters_manifest_path(manifest_path, sizeof(manifest_path),
+                                                    g_adblock_cache_dir) != 0;
+            ok = ok && zephium_filters_stamp_path(stamp_path, sizeof(stamp_path),
+                                                  g_adblock_cache_dir) != 0;
+            ok = ok && job->manifest_text && job->manifest_len > 0 &&
+                 adblock_write_file_atomic(manifest_path, job->manifest_text, job->manifest_len);
+            size_t stamp_len = 0;
+            if (ok) {
+                stamp_len = zephium_filters_stamp_format(stamp, sizeof(stamp), job->version,
+                                                         job->declared_total_rules,
+                                                         adblock_now_seconds());
+                ok = stamp_len > 0 && adblock_write_file_atomic(stamp_path, stamp, stamp_len);
+            }
+            if (ok) {
+                zephium_log("INFO", "ADBLOCK", "cache updated version=%s files=%zu declared_rules=%llu",
+                            job->version, job->file_count,
+                            (unsigned long long)job->declared_total_rules);
+                adblock_sweep_store(job->version, job->files, job->file_count);
+                adblock_cleanup_old_versions();
+            } else {
+                zephium_log("WARN", "ADBLOCK_FAILED",
+                            "Could not persist the downloaded filter cache; it will be fetched again.");
+            }
+            if (g_adblock_refreshing) g_adblock_refreshing = false;
+        }
+    } else {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "No content filter compiled (version=%s failed=%u); continuing without the downloaded list.",
+                    job->version, job->failed);
+        if (job->persist && g_adblock_refreshing) g_adblock_refreshing = false;
+    }
+    adblock_job_free(job);
+}
+
+/* Removes compiled filters of older releases from the store so it does not grow
+ * with one binary per part per day. The legacy unversioned fallback identifier is
+ * swept too once a versioned filter is active. */
+typedef struct {
+    char version[ZEPHIUM_FILTERS_VERSION_CAP];
+    zephium_filter_file_t files[ZEPHIUM_FILTERS_MAX_FILTERS];
+    size_t file_count;
+} adblock_sweep_t;
+
+/* Removal is asynchronous; a failure only means one stale store entry lives on,
+ * so it is logged at WARN and never retried. */
+static void adblock_on_filter_removed(GObject *source, GAsyncResult *result,
+                                      gpointer user_data) {
+    char *identifier = (char *)user_data;
+    GError *error = NULL;
+    gboolean removed = webkit_user_content_filter_store_remove_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+    if (!removed) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot remove compiled filter %s (%s).",
+                    identifier ? identifier : "?", error ? error->message : "unknown error");
+    }
+    if (error) g_error_free(error);
+    g_free(identifier);
+}
+
+static void adblock_on_store_identifiers(GObject *source, GAsyncResult *result,
+                                         gpointer user_data) {
+    adblock_sweep_t *sweep = (adblock_sweep_t *)user_data;
+    gchar **identifiers = webkit_user_content_filter_store_fetch_identifiers_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(source), result);
+    if (!identifiers) {
+        g_free(sweep);
+        return;
+    }
+    for (size_t i = 0; identifiers[i]; ++i) {
+        const char *identifier = identifiers[i];
+        bool keep = false;
+        for (size_t f = 0; f < sweep->file_count && !keep; ++f) {
+            char expected[ZEPHIUM_FILTERS_IDENTIFIER_CAP];
+            if (zephium_filters_store_identifier(sweep->files[f].file, sweep->version,
+                                                 expected, sizeof(expected)) > 0 &&
+                strcmp(identifier, expected) == 0) {
+                keep = true;
+            }
+        }
+        if (keep) continue;
+        if (!zephium_filters_identifier_owned(identifier) &&
+            strcmp(identifier, ZEPHIUM_ADBLOCK_LEGACY_STORE_IDENTIFIER) != 0) {
+            continue; /* not ours */
+        }
+        zephium_log("INFO", "ADBLOCK", "removing stale compiled filter %s", identifier);
+        webkit_user_content_filter_store_remove(g_adblock_store, identifier, NULL,
+                                                adblock_on_filter_removed, g_strdup(identifier));
+    }
+    g_strfreev(identifiers);
+    g_free(sweep);
+}
+
+static void adblock_sweep_store(const char *version, const zephium_filter_file_t *files,
+                                size_t count) {
+    if (!g_adblock_store || !version || !files || count == 0) return;
+    adblock_sweep_t *sweep = g_new0(adblock_sweep_t, 1);
+    if (zephium_strcpy_safe(sweep->version, sizeof(sweep->version), version) != 0) {
+        g_free(sweep);
+        return;
+    }
+    for (size_t i = 0; i < count && i < ZEPHIUM_FILTERS_MAX_FILTERS; ++i) {
+        sweep->files[i] = files[i];
+    }
+    sweep->file_count = count;
+    webkit_user_content_filter_store_fetch_identifiers(g_adblock_store, NULL,
+                                                       adblock_on_store_identifiers, sweep);
+}
+
+/* Best-effort removal of old release directories and of a partial download. */
+static void adblock_cleanup_old_versions(void) {
+    if (g_adblock_cache_dir[0] == '\0' || g_adblock_version[0] == '\0') return;
+    char version_root[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_path_join(version_root, sizeof(version_root), g_adblock_cache_dir,
+                                  "v") == 0) {
+        return;
+    }
+    char keep[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_list_dir_path(keep, sizeof(keep), g_adblock_cache_dir,
+                                      g_adblock_version) == 0) {
+        return;
+    }
+    GDir *dir = g_dir_open(version_root, 0, NULL);
+    if (dir) {
+        const char *name;
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            char candidate[ZEPHIUM_FILTERS_PATH_CAP];
+            if (zephium_filters_path_join(candidate, sizeof(candidate), version_root, name) == 0) {
+                continue;
+            }
+            if (strcmp(candidate, keep) == 0) continue;
+            GDir *inner = g_dir_open(candidate, 0, NULL);
+            if (inner) {
+                const char *leaf;
+                char file_path[ZEPHIUM_FILTERS_PATH_CAP];
+                while ((leaf = g_dir_read_name(inner)) != NULL) {
+                    if (zephium_filters_path_join(file_path, sizeof(file_path), candidate,
+                                                  leaf) != 0) {
+                        (void)g_remove(file_path);
+                    }
+                }
+                g_dir_close(inner);
+            }
+            (void)g_rmdir(candidate);
+        }
+        g_dir_close(dir);
+    }
+    char leftover[ZEPHIUM_FILTERS_PATH_CAP];
+    int written = snprintf(leftover, sizeof(leftover), "%s/%s.new", g_adblock_cache_dir,
+                           ZEPHIUM_ADBLOCK_MANIFEST_FILE);
+    if (written > 0 && (size_t)written < sizeof(leftover)) (void)g_remove(leftover);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Startup: built-in fallback, warm start from the cache                     */
+/* ------------------------------------------------------------------------- */
+
+static void on_adblock_filter_ready(GObject *source, GAsyncResult *result, gpointer user_data);
+
+static void adblock_compile_builtin(void) {
+    char rules[4096];
+    size_t rules_len = zephium_browser_generate_adblock_rules(rules, sizeof(rules));
+    if (rules_len == 0 || rules_len >= sizeof(rules)) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Rule generation failed; continuing without ad blocking.");
+        return;
+    }
+    if (!g_adblock_store) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "No content filter store; continuing without ad blocking.");
+        return;
+    }
+    GBytes *source = g_bytes_new(rules, rules_len);
+    webkit_user_content_filter_store_save(g_adblock_store,
+                                          ZEPHIUM_ADBLOCK_LEGACY_STORE_IDENTIFIER, source, NULL,
+                                          on_adblock_filter_ready, NULL);
+    g_bytes_unref(source);
+    zephium_log("INFO", "ADBLOCK", "Compiling %zu bytes of built-in blocker rules...", rules_len);
+}
+
+/* Reads the cache stamp and checks whether every file of the manifest is on
+ * disk for the release the stamp names. */
+static bool adblock_cached_release_state(const zephium_filter_manifest_t *manifest,
+                                         const zephium_filter_file_t *files, size_t file_count,
+                                         zephium_filters_cache_state_t *state,
+                                         char *version_out, size_t version_cap) {
+    memset(state, 0, sizeof(*state));
+    version_out[0] = '\0';
+
+    char stamp_path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_stamp_path(stamp_path, sizeof(stamp_path), g_adblock_cache_dir) == 0) {
+        return false;
+    }
+    char stamp_text[512];
+    size_t stamp_len = 0;
+    if (adblock_read_file(stamp_path, stamp_text, sizeof(stamp_text), &stamp_len)) {
+        char stamp_version[ZEPHIUM_FILTERS_VERSION_CAP];
+        uint64_t rules = 0;
+        int64_t fetched_at = 0;
+        if (zephium_filters_stamp_parse(stamp_text, stamp_len, stamp_version,
+                                        sizeof(stamp_version), &rules, &fetched_at)) {
+            state->stamp_present = true;
+            state->stamp_fetched_at = fetched_at;
+            (void)zephium_strcpy_safe(version_out, version_cap, stamp_version);
+        }
+    }
+
+    char manifest_path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_manifest_path(manifest_path, sizeof(manifest_path),
+                                      g_adblock_cache_dir) != 0) {
+        char *manifest_text = NULL;
+        gsize manifest_len = 0;
+        if (g_file_get_contents(manifest_path, &manifest_text, &manifest_len, NULL)) {
+            zephium_filter_manifest_t cached;
+            zephium_filters_manifest_init(&cached);
+            if (manifest_len <= ZEPHIUM_ADBLOCK_MANIFEST_MAX_BYTES &&
+                zephium_filters_manifest_parse(manifest_text, (size_t)manifest_len, &cached) &&
+                strcmp(cached.version, version_out) == 0) {
+                state->manifest_present = true;
+            }
+            g_free(manifest_text);
+        }
+    }
+
+    if (state->manifest_present && state->stamp_present &&
+        strcmp(version_out, manifest->version) == 0) {
+        bool all_present = true;
+        for (size_t i = 0; i < file_count && all_present; ++i) {
+            char path[ZEPHIUM_FILTERS_PATH_CAP];
+            if (zephium_filters_list_path(path, sizeof(path), g_adblock_cache_dir, version_out,
+                                          files[i].file) == 0) {
+                all_present = false;
+                break;
+            }
+            GStatBuf info;
+            if (g_stat(path, &info) != 0 || info.st_size <= 0) all_present = false;
+        }
+        state->lists_complete = all_present;
+    }
+    return state->stamp_present;
+}
+
+/* Fills g_adblock_manifest/_version/_selection from the cache. False when the
+ * cache is missing or incomplete: the caller then uses the built-in rules. */
+static bool adblock_probe_cache(void) {
+    g_adblock_version[0] = '\0';
+    g_adblock_selection[0].file[0] = '\0';
+    g_adblock_selection_count = 0;
+    memset(&g_adblock_manifest, 0, sizeof(g_adblock_manifest));
+    if (g_adblock_cache_dir[0] == '\0') return false;
+
+    char manifest_path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_manifest_path(manifest_path, sizeof(manifest_path),
+                                      g_adblock_cache_dir) == 0) {
+        return false;
+    }
+    char *manifest_text = NULL;
+    gsize manifest_len = 0;
+    if (!g_file_get_contents(manifest_path, &manifest_text, &manifest_len, NULL)) return false;
+    bool parsed = manifest_len <= ZEPHIUM_ADBLOCK_MANIFEST_MAX_BYTES &&
+                  zephium_filters_manifest_parse(manifest_text, (size_t)manifest_len,
+                                                 &g_adblock_manifest);
+    g_free(manifest_text);
+    if (!parsed) return false;
+
+    size_t count = zephium_filters_select(&g_adblock_manifest, adblock_prefer_combined(),
+                                          g_adblock_selection,
+                                          ZEPHIUM_FILTERS_MAX_FILTERS);
+    if (count == 0) return false;
+
+    zephium_filters_cache_state_t state;
+    char stamp_version[ZEPHIUM_FILTERS_VERSION_CAP];
+    if (!adblock_cached_release_state(&g_adblock_manifest, g_adblock_selection, count, &state,
+                                      stamp_version, sizeof(stamp_version))) {
+        return false;
+    }
+    if (!zephium_filters_cache_is_complete(&state)) return false;
+    (void)zephium_strcpy_safe(g_adblock_version, sizeof(g_adblock_version), stamp_version);
+    g_adblock_selection_count = count;
+    return true;
+}
+
+/* Warm start: load() every versioned identifier, compile the cached JSON only
+ * when the store entry is missing. No manifest check, no download. */
+static void adblock_compile_cached_release(void) {
+    if (!g_adblock_store || g_adblock_selection_count == 0) return;
+    if (g_adblock_compile_in_flight) return;
+    adblock_job_t *job = adblock_job_new(g_adblock_version, g_adblock_selection,
+                                         g_adblock_selection_count, 0, 0, false);
+    if (!job) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot start the cached filter compile job.");
+        return;
+    }
+    adblock_job_start(job);
+}
+
+#if defined(ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER)
+/* ------------------------------------------------------------------------- */
+/* Background refresh via libsoup-3.0                                        */
+/* ------------------------------------------------------------------------- */
+
+typedef void (*adblock_download_done_fn)(bool ok, guint64 bytes, gpointer user_data);
+
+typedef struct {
+    SoupMessage *message;
+    GInputStream *stream;
+    GFileOutputStream *output;
+    char url[1024];
+    char path[ZEPHIUM_FILTERS_PATH_CAP];
+    char tmp_path[ZEPHIUM_FILTERS_PATH_CAP];
+    guint64 max_bytes;
+    guint64 received;
+    adblock_download_done_fn done;
+    gpointer user_data;
+} adblock_download_t;
+
+/* Base URL of the release assets. The override exists for tests that serve the
+ * release from a local HTTP server instead of GitHub. */
+static const char *adblock_url_base(void) {
+    const char *override = getenv("ZEPHIUM_ADBLOCK_URL_BASE");
+    return (override && *override) ? override : ZEPHIUM_ADBLOCK_URL_BASE_DEFAULT;
+}
+
+typedef struct {
+    zephium_filter_manifest_t manifest;
+    char *manifest_text;
+    size_t manifest_len;
+    zephium_filter_file_t files[ZEPHIUM_FILTERS_MAX_FILTERS];
+    size_t file_count;
+    size_t next_index;
+    guint32 rules_total;
+} adblock_refresh_t;
+
+static adblock_refresh_t *g_adblock_refresh = NULL;
+
+static void adblock_download_complete(adblock_download_t *download, bool ok);
+static void adblock_download_on_write(GObject *source, GAsyncResult *result, gpointer user_data);
+
+/* One chunk written; keep reading. */
+static void adblock_download_on_chunk(GObject *source, GAsyncResult *result,
+                                      gpointer user_data) {
+    adblock_download_t *download = (adblock_download_t *)user_data;
+    GError *error = NULL;
+    GBytes *chunk = g_input_stream_read_bytes_finish(G_INPUT_STREAM(source), result, &error);
+    if (!chunk) {
+        if (error) g_error_free(error);
+        adblock_download_complete(download, false);
+        return;
+    }
+    gsize chunk_size = g_bytes_get_size(chunk);
+    if (chunk_size == 0) {
+        g_bytes_unref(chunk);
+        adblock_download_complete(download, true);
+        return;
+    }
+    download->received += (guint64)chunk_size;
+    if (download->received > download->max_bytes) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Download of %s exceeded %llu bytes; aborted.",
+                    adblock_redacted_name(download->path),
+                    (unsigned long long)download->max_bytes);
+        g_bytes_unref(chunk);
+        adblock_download_complete(download, false);
+        return;
+    }
+    g_output_stream_write_bytes_async(G_OUTPUT_STREAM(download->output), chunk,
+                                      G_PRIORITY_DEFAULT, NULL,
+                                      adblock_download_on_write, download);
+    g_bytes_unref(chunk);
+}
+
+static void adblock_download_on_write(GObject *source, GAsyncResult *result,
+                                      gpointer user_data) {
+    adblock_download_t *download = (adblock_download_t *)user_data;
+    GError *error = NULL;
+    gssize written = g_output_stream_write_bytes_finish(G_OUTPUT_STREAM(source), result, &error);
+    if (written < 0) {
+        if (error) g_error_free(error);
+        adblock_download_complete(download, false);
+        return;
+    }
+    g_input_stream_read_bytes_async(download->stream, 64 * 1024, G_PRIORITY_DEFAULT, NULL,
+                                    adblock_download_on_chunk, download);
+}
+
+static void adblock_download_on_sent(GObject *source, GAsyncResult *result,
+                                     gpointer user_data) {
+    adblock_download_t *download = (adblock_download_t *)user_data;
+    GError *error = NULL;
+    GInputStream *stream = soup_session_send_finish(SOUP_SESSION(source), result, &error);
+    if (!stream) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Request for %s failed (%s).",
+                    adblock_redacted_name(download->path),
+                    error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        adblock_download_complete(download, false);
+        return;
+    }
+    unsigned int status = (unsigned int)soup_message_get_status(download->message);
+    if (status < 200u || status >= 300u) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "HTTP %u for %s.", status,
+                    adblock_redacted_name(download->path));
+        g_object_unref(stream);
+        adblock_download_complete(download, false);
+        return;
+    }
+    download->stream = stream;
+
+    GFile *tmp = g_file_new_for_path(download->tmp_path);
+    download->output = g_file_replace(tmp, NULL, FALSE, G_FILE_CREATE_REPLACE_DESTINATION, NULL,
+                                      &error);
+    g_object_unref(tmp);
+    if (!download->output) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot open %s for writing (%s).",
+                    adblock_redacted_name(download->tmp_path),
+                    error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        adblock_download_complete(download, false);
+        return;
+    }
+    g_input_stream_read_bytes_async(download->stream, 64 * 1024, G_PRIORITY_DEFAULT, NULL,
+                                    adblock_download_on_chunk, download);
+}
+
+/* Finishes the transfer: closes the file, renames it into place and reports.
+ * The caller's callback always runs, so a refresh never stays "in progress". */
+static void adblock_download_complete(adblock_download_t *download, bool ok) {
+    if (!download) return;
+    if (download->output) {
+        (void)g_output_stream_close(G_OUTPUT_STREAM(download->output), NULL, NULL);
+        g_object_unref(download->output);
+        download->output = NULL;
+    }
+    if (download->stream) {
+        g_object_unref(download->stream);
+        download->stream = NULL;
+    }
+    bool stored = false;
+    if (ok) {
+        GFile *from = g_file_new_for_path(download->tmp_path);
+        GFile *to = g_file_new_for_path(download->path);
+        GError *error = NULL;
+        stored = g_file_move(from, to, G_FILE_COPY_OVERWRITE, NULL, NULL, NULL, &error);
+        g_object_unref(from);
+        g_object_unref(to);
+        if (!stored) {
+            zephium_log("WARN", "ADBLOCK_FAILED", "Cannot store %s (%s).",
+                        adblock_redacted_name(download->path),
+                        error ? error->message : "rename failed");
+            if (error) g_error_free(error);
+        }
+    }
+    if (!stored) (void)g_remove(download->tmp_path);
+
+    guint64 received = download->received;
+    adblock_download_done_fn done = download->done;
+    gpointer user_data = download->user_data;
+    if (download->message) g_object_unref(download->message);
+    g_free(download);
+    if (done) done(stored, received, user_data);
+}
+
+static void adblock_download_start(const char *url, const char *path, guint64 max_bytes,
+                                   adblock_download_done_fn done, gpointer user_data) {
+    if (!g_adblock_soup || !url || !path) {
+        if (done) done(false, 0, user_data);
+        return;
+    }
+    adblock_download_t *download = g_new0(adblock_download_t, 1);
+    download->max_bytes = max_bytes;
+    download->done = done;
+    download->user_data = user_data;
+    (void)zephium_strcpy_safe(download->url, sizeof(download->url), url);
+    (void)zephium_strcpy_safe(download->path, sizeof(download->path), path);
+    if (zephium_filters_tmp_path(download->tmp_path, sizeof(download->tmp_path),
+                                 download->path) == 0) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cache path too long for %s.",
+                    adblock_redacted_name(download->path));
+        g_free(download);
+        if (done) done(false, 0, user_data);
+        return;
+    }
+    download->message = soup_message_new("GET", download->url);
+    if (!download->message) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Invalid download URL for %s.",
+                    adblock_redacted_name(download->path));
+        g_free(download);
+        if (done) done(false, 0, user_data);
+        return;
+    }
+    soup_session_send_async(g_adblock_soup, download->message, G_PRIORITY_DEFAULT, NULL,
+                            adblock_download_on_sent, download);
+}
+
+/* JSON validation streams the file off the main thread: 24MB scans take tens of
+ * milliseconds and must not stall a page load. */
+typedef struct {
+    char path[ZEPHIUM_FILTERS_PATH_CAP];
+    size_t index;
+    zephium_filter_json_stats_t stats;
+} adblock_validate_job_t;
+
+static void adblock_validate_worker(GTask *task, gpointer source_object, gpointer task_data,
+                                    GCancellable *cancellable) {
+    (void)source_object;
+    (void)cancellable;
+    adblock_validate_job_t *job = (adblock_validate_job_t *)task_data;
+    bool valid = zephium_filters_json_file_validate(job->path, &job->stats);
+    g_task_return_boolean(task, valid);
+}
+
+static void adblock_refresh_abort(void) {
+    if (g_adblock_refresh) {
+        g_free(g_adblock_refresh->manifest_text);
+        g_free(g_adblock_refresh);
+        g_adblock_refresh = NULL;
+    }
+    g_adblock_refreshing = false;
+}
+
+static void adblock_refresh_compile(void);
+static void adblock_download_next_file(void);
+
+static void adblock_on_list_validated(GObject *source, GAsyncResult *result,
+                                      gpointer user_data) {
+    adblock_validate_job_t *job = (adblock_validate_job_t *)user_data;
+    GTask *task = G_TASK(result);
+    (void)source;
+    bool valid = g_task_propagate_boolean(task, NULL);
+    adblock_refresh_t *refresh = g_adblock_refresh;
+    if (!refresh) {
+        g_free(job);
+        return;
+    }
+    if (!valid) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Downloaded filter list is not a valid WebKit JSON array; keeping cached filters.");
+        g_free(job);
+        adblock_refresh_abort();
+        return;
+    }
+    zephium_filter_file_t *entry = &refresh->files[job->index];
+    if (!zephium_filters_rule_count_ok(job->stats.top_level_rules)) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "filter=%s has %u rules, above the WebKit per-filter limit %u; list skipped.",
+                    entry->file, job->stats.top_level_rules, ZEPHIUM_FILTERS_RULE_CAP);
+        g_free(job);
+        adblock_refresh_abort();
+        return;
+    }
+    entry->rules_count = job->stats.top_level_rules;
+    refresh->rules_total += job->stats.top_level_rules;
+    zephium_log("INFO", "ADBLOCK", "filter=%s rules=%u bytes=%zu", entry->file,
+                entry->rules_count, job->stats.bytes);
+    g_free(job);
+    ++refresh->next_index;
+    adblock_download_next_file();
+}
+
+static void adblock_on_list_downloaded(bool ok, guint64 bytes, gpointer user_data) {
+    (void)user_data;
+    adblock_refresh_t *refresh = g_adblock_refresh;
+    if (!refresh) return;
+    const zephium_filter_file_t *entry = &refresh->files[refresh->next_index];
+    if (!ok) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Downloading %s failed; keeping the cached filters.", entry->file);
+        adblock_refresh_abort();
+        return;
+    }
+    zephium_log("INFO", "ADBLOCK_DOWNLOAD", "downloaded %s bytes=%llu", entry->file,
+                (unsigned long long)bytes);
+
+    char path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_list_path(path, sizeof(path), g_adblock_cache_dir,
+                                  refresh->manifest.version, entry->file) == 0) {
+        adblock_refresh_abort();
+        return;
+    }
+    adblock_validate_job_t *job = g_new0(adblock_validate_job_t, 1);
+    (void)zephium_strcpy_safe(job->path, sizeof(job->path), path);
+    job->index = refresh->next_index;
+    GTask *task = g_task_new(NULL, NULL, adblock_on_list_validated, job);
+    /* The callback frees the job; the task must not free it a second time. */
+    g_task_set_task_data(task, job, NULL);
+    g_task_run_in_thread(task, adblock_validate_worker);
+    g_object_unref(task);
+}
+
+static void adblock_download_next_file(void) {
+    adblock_refresh_t *refresh = g_adblock_refresh;
+    if (!refresh) return;
+    while (refresh->next_index < refresh->file_count &&
+           refresh->files[refresh->next_index].file[0] == '\0') {
+        ++refresh->next_index;
+    }
+    if (refresh->next_index >= refresh->file_count) {
+        adblock_refresh_compile();
+        return;
+    }
+    const zephium_filter_file_t *entry = &refresh->files[refresh->next_index];
+
+    char dir[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_list_dir_path(dir, sizeof(dir), g_adblock_cache_dir,
+                                      refresh->manifest.version) == 0 ||
+        g_mkdir_with_parents(dir, 0700) != 0) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot create the filter cache directory; keeping cached filters.");
+        adblock_refresh_abort();
+        return;
+    }
+    char path[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_list_path(path, sizeof(path), g_adblock_cache_dir,
+                                  refresh->manifest.version, entry->file) == 0) {
+        adblock_refresh_abort();
+        return;
+    }
+    char url[1024];
+    int written = snprintf(url, sizeof(url), "%s%s", adblock_url_base(), entry->file);
+    if (written <= 0 || (size_t)written >= sizeof(url)) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Download URL too long for %s.", entry->file);
+        adblock_refresh_abort();
+        return;
+    }
+    zephium_log("INFO", "ADBLOCK_DOWNLOAD", "downloading %s", entry->file);
+    adblock_download_start(url, path, ZEPHIUM_ADBLOCK_LIST_MAX_BYTES,
+                           adblock_on_list_downloaded, NULL);
+}
+
+static void adblock_refresh_compile(void) {
+    adblock_refresh_t *refresh = g_adblock_refresh;
+    if (!refresh) return;
+    g_adblock_refresh = NULL;
+    adblock_job_t *job = adblock_job_new(refresh->manifest.version, refresh->files,
+                                         refresh->file_count, refresh->rules_total,
+                                         refresh->manifest.declared_total_rules, true);
+    if (!job) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot start the filter compile job; keeping cached filters.");
+        g_free(refresh->manifest_text);
+        g_free(refresh);
+        g_adblock_refreshing = false;
+        return;
+    }
+    job->manifest_text = refresh->manifest_text;
+    job->manifest_len = refresh->manifest_len;
+    refresh->manifest_text = NULL;
+    g_free(refresh);
+    adblock_job_start(job);
+}
+
+static void adblock_on_manifest_downloaded(bool ok, guint64 bytes, gpointer user_data) {
+    (void)user_data;
+    if (!ok) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Filter-list manifest download failed; keeping the cached/offline ad blocking.");
+        g_adblock_refreshing = false;
+        return;
+    }
+    char manifest_new_path[ZEPHIUM_FILTERS_PATH_CAP];
+    int written = snprintf(manifest_new_path, sizeof(manifest_new_path), "%s/%s.new",
+                           g_adblock_cache_dir, ZEPHIUM_ADBLOCK_MANIFEST_FILE);
+    if (written <= 0 || (size_t)written >= sizeof(manifest_new_path)) {
+        g_adblock_refreshing = false;
+        return;
+    }
+    char *text = NULL;
+    gsize text_len = 0;
+    GError *error = NULL;
+    if (!g_file_get_contents(manifest_new_path, &text, &text_len, &error)) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Cannot read the downloaded manifest (%s).",
+                    error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        (void)g_remove(manifest_new_path);
+        g_adblock_refreshing = false;
+        return;
+    }
+    (void)g_remove(manifest_new_path);
+
+    adblock_refresh_t *refresh = g_new0(adblock_refresh_t, 1);
+    refresh->manifest_text = text;
+    refresh->manifest_len = (size_t)text_len;
+    if (!zephium_filters_manifest_parse(refresh->manifest_text, refresh->manifest_len,
+                                        &refresh->manifest)) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Filter-list manifest is not valid JSON (%llu bytes); keeping cached filters.",
+                    (unsigned long long)bytes);
+        adblock_refresh_abort();
+        g_free(refresh->manifest_text);
+        g_free(refresh);
+        return;
+    }
+    zephium_log("INFO", "ADBLOCK",
+                "manifest version=%s declared_rules=%llu combined=%zu lists=%zu bytes=%llu",
+                refresh->manifest.version,
+                (unsigned long long)refresh->manifest.declared_total_rules,
+                refresh->manifest.combined_count, refresh->manifest.list_count,
+                (unsigned long long)bytes);
+    refresh->file_count = zephium_filters_select(&refresh->manifest, adblock_prefer_combined(),
+                                                 refresh->files,
+                                                 ZEPHIUM_FILTERS_MAX_FILTERS);
+    if (refresh->file_count == 0) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Manifest selected no usable filter files.");
+        g_free(refresh->manifest_text);
+        g_free(refresh);
+        g_adblock_refreshing = false;
+        return;
+    }
+
+    zephium_filters_cache_state_t state;
+    char cached_version[ZEPHIUM_FILTERS_VERSION_CAP];
+    bool have_stamp = adblock_cached_release_state(&refresh->manifest, refresh->files,
+                                                   refresh->file_count, &state,
+                                                   cached_version, sizeof(cached_version));
+    int64_t now = adblock_now_seconds();
+    bool same_release = have_stamp && strcmp(cached_version, refresh->manifest.version) == 0;
+    bool complete = same_release && zephium_filters_cache_is_complete(&state);
+    bool reusable = complete && zephium_filters_cache_can_reuse(&state, now);
+
+    if (complete) {
+        /* Version already on disk. Update the stamp so the 24h window restarts
+         * without touching the network again. */
+        char stamp_path[ZEPHIUM_FILTERS_PATH_CAP];
+        char stamp[256];
+        size_t stamp_len = zephium_filters_stamp_format(
+            stamp, sizeof(stamp), refresh->manifest.version,
+            refresh->manifest.declared_total_rules, now);
+        bool stamped = stamp_len > 0 &&
+                       zephium_filters_stamp_path(stamp_path, sizeof(stamp_path),
+                                                  g_adblock_cache_dir) != 0 &&
+                       adblock_write_file_atomic(stamp_path, stamp, stamp_len);
+        zephium_log("INFO", "ADBLOCK", "cache hit version=%s%s%s",
+                    refresh->manifest.version, reusable ? " (fresh)" : " (stale, refreshed stamp)",
+                    stamped ? "" : " (stamp write failed)");
+        if (!g_adblock_filters && !g_adblock_compile_in_flight) {
+            /* The cache is complete but nothing is applied and no compile is
+             * running (the startup compile failed): try the cached files again. */
+            (void)zephium_strcpy_safe(g_adblock_version, sizeof(g_adblock_version),
+                                      refresh->manifest.version);
+            g_adblock_selection_count = refresh->file_count;
+            for (size_t i = 0; i < refresh->file_count; ++i) {
+                g_adblock_selection[i] = refresh->files[i];
+            }
+            adblock_compile_cached_release();
+        }
+        g_free(refresh->manifest_text);
+        g_free(refresh);
+        g_adblock_refreshing = false;
+        return;
+    }
+
+    zephium_log("INFO", "ADBLOCK",
+                "cache miss version=%s (cached=%s complete=%d); downloading %zu filter files",
+                refresh->manifest.version,
+                have_stamp ? cached_version : "none", complete ? 1 : 0, refresh->file_count);
+    g_adblock_refresh = refresh;
+    refresh->next_index = 0;
+    refresh->rules_total = 0;
+
+    char dir[ZEPHIUM_FILTERS_PATH_CAP];
+    if (zephium_filters_list_dir_path(dir, sizeof(dir), g_adblock_cache_dir,
+                                      refresh->manifest.version) == 0 ||
+        g_mkdir_with_parents(dir, 0700) != 0) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot create the filter cache directory; keeping cached filters.");
+        adblock_refresh_abort();
+        return;
+    }
+    adblock_download_next_file();
+}
+
+static void adblock_check_manifest(void) {
+    if (!g_adblock_enabled || g_adblock_refreshing || !g_adblock_soup) return;
+    if (g_adblock_cache_dir[0] == '\0') return;
+    char manifest_new_path[ZEPHIUM_FILTERS_PATH_CAP];
+    int written = snprintf(manifest_new_path, sizeof(manifest_new_path), "%s/%s.new",
+                           g_adblock_cache_dir, ZEPHIUM_ADBLOCK_MANIFEST_FILE);
+    if (written <= 0 || (size_t)written >= sizeof(manifest_new_path)) return;
+    char url[1024];
+    written = snprintf(url, sizeof(url), "%s%s", adblock_url_base(),
+                       ZEPHIUM_ADBLOCK_MANIFEST_FILE);
+    if (written <= 0 || (size_t)written >= sizeof(url)) return;
+
+    g_adblock_refreshing = true;
+    zephium_log("INFO", "ADBLOCK_CACHE", "checking the upstream filter manifest");
+    adblock_download_start(url, manifest_new_path, ZEPHIUM_ADBLOCK_MANIFEST_MAX_BYTES,
+                           adblock_on_manifest_downloaded, NULL);
+}
+
+static gboolean adblock_refresh_tick(gpointer data) {
+    (void)data;
+    adblock_check_manifest();
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean adblock_startup_tick(gpointer data) {
+    (void)data;
+    adblock_check_manifest();
+    return G_SOURCE_REMOVE;
+}
+#endif /* ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER */
+
+/* Compiled built-in rules became available (offline first run). */
 static void on_adblock_filter_ready(GObject *source, GAsyncResult *result, gpointer user_data) {
     (void)user_data;
     GError *error = NULL;
-    WebKitUserContentFilter *filter =
-        webkit_user_content_filter_store_save_finish(WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+    WebKitUserContentFilter *filter = webkit_user_content_filter_store_save_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
     if (!filter) {
         /* An ad blocker is never worth an error page: browse without it. */
         zephium_log("WARN", "ADBLOCK_FAILED",
@@ -451,41 +1695,104 @@ static void on_adblock_filter_ready(GObject *source, GAsyncResult *result, gpoin
         if (error) g_error_free(error);
         return;
     }
-
-    g_app.adblock_filter = filter;
-    adblock_apply_to_tabs(filter);
-    zephium_log("INFO", "ADBLOCK", "Content filter active.");
+    if (g_adblock_filters) g_ptr_array_unref(g_adblock_filters);
+    g_adblock_filters = g_ptr_array_new_with_free_func(g_object_unref);
+    g_ptr_array_add(g_adblock_filters, filter);
+    adblock_apply_to_tabs();
+    zephium_log("INFO", "ADBLOCK", "Content filter active (built-in rules).");
 }
 
-static void adblock_init(bool cli_disabled) {
-    if (!zephium_adblock_enabled(cli_disabled)) {
+static void adblock_startup(bool cli_disabled) {
+    g_adblock_enabled = zephium_adblock_enabled(cli_disabled);
+    if (!g_adblock_enabled) {
         zephium_log("INFO", "ADBLOCK", "Disabled (ZEPHIUM_ADBLOCK=0 or --no-adblock).");
         return;
     }
 
-    char rules[4096];
-    size_t rules_len = zephium_browser_generate_adblock_rules(rules, sizeof(rules));
-    if (rules_len == 0 || rules_len >= sizeof(rules)) {
-        zephium_log("WARN", "ADBLOCK_FAILED", "Rule generation failed; continuing without ad blocking.");
-        return;
+    if (adblock_cache_directory(g_adblock_cache_dir, sizeof(g_adblock_cache_dir))) {
+        if (g_mkdir_with_parents(g_adblock_cache_dir, 0700) != 0) {
+            zephium_log("WARN", "ADBLOCK_FAILED",
+                        "Cannot create the filter cache directory; using built-in rules only.");
+            g_adblock_cache_dir[0] = '\0';
+        }
+    } else {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot resolve the filter cache directory; using built-in rules only.");
+        g_adblock_cache_dir[0] = '\0';
     }
 
     char *store_dir = g_build_filename(g_get_user_cache_dir(), "zephium", "content-filters", NULL);
     if (g_mkdir_with_parents(store_dir, 0700) != 0) {
         zephium_log("WARN", "ADBLOCK_FAILED",
-                    "Cannot create the filter store directory %s; continuing without ad blocking.",
-                    store_dir);
+                    "Cannot create the filter store directory; continuing without ad blocking.");
         g_free(store_dir);
         return;
     }
     g_adblock_store = webkit_user_content_filter_store_new(store_dir);
     g_free(store_dir);
+    if (!g_adblock_store) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot create the content filter store; continuing without ad blocking.");
+        return;
+    }
 
-    GBytes *source = g_bytes_new(rules, rules_len);
-    webkit_user_content_filter_store_save(g_adblock_store, ZEPHIUM_ADBLOCK_STORE_IDENTIFIER, source,
-                                          NULL, on_adblock_filter_ready, NULL);
-    g_bytes_unref(source);
-    zephium_log("INFO", "ADBLOCK", "Compiling %zu bytes of blocker rules...", rules_len);
+#if defined(ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER)
+    g_adblock_soup = soup_session_new();
+    if (g_adblock_soup) {
+        soup_session_set_user_agent(g_adblock_soup, ZEPHIUM_ADBLOCK_USER_AGENT);
+    } else {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot create the HTTP session; filter-list downloads disabled.");
+    }
+#endif
+
+    if (g_adblock_cache_dir[0] != '\0' && adblock_probe_cache()) {
+        zephium_log("INFO", "ADBLOCK", "cache hit version=%s filters=%zu (warm start, no download)",
+                    g_adblock_version, g_adblock_selection_count);
+        adblock_compile_cached_release();
+    } else {
+        if (g_adblock_cache_dir[0] != '\0') {
+            zephium_log("INFO", "ADBLOCK",
+                        "cache miss: no complete cached release; compiling built-in rules.");
+        }
+        adblock_compile_builtin();
+    }
+
+#if defined(ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER)
+    if (g_adblock_soup) {
+        /* The manifest check runs after the first paint (3s), never during
+         * startup, and then once a day. */
+        (void)g_timeout_add_seconds(ZEPHIUM_ADBLOCK_STARTUP_CHECK_SECONDS,
+                                    adblock_startup_tick, NULL);
+        g_adblock_periodic_timer = g_timeout_add_seconds(ZEPHIUM_ADBLOCK_REFRESH_SECONDS,
+                                                         adblock_refresh_tick, NULL);
+    }
+#endif
+}
+
+/* Releases the filter store and any in-flight refresh. Runs after gtk_main()
+ * returns, so pending callbacks never observe half-freed state. */
+static void adblock_shutdown(void) {
+    if (g_adblock_periodic_timer) {
+        g_source_remove(g_adblock_periodic_timer);
+        g_adblock_periodic_timer = 0;
+    }
+#if defined(ZEPHIUM_ENABLE_ADBLOCK_DOWNLOADER)
+    if (g_adblock_soup) {
+        soup_session_abort(g_adblock_soup);
+        g_object_unref(g_adblock_soup);
+        g_adblock_soup = NULL;
+    }
+    adblock_refresh_abort();
+#endif
+    if (g_adblock_filters) {
+        g_ptr_array_unref(g_adblock_filters);
+        g_adblock_filters = NULL;
+    }
+    if (g_adblock_store) {
+        g_object_unref(g_adblock_store);
+        g_adblock_store = NULL;
+    }
 }
 
 static WebKitWebView *get_active_web_view(zephium_gtk_app_t *app) {
@@ -815,8 +2122,11 @@ static gboolean on_load_failed_with_tls_errors(WebKitWebView *web_view, gchar *f
 
 static GtkWidget *create_tab_view(zephium_gtk_app_t *app, const char *url, bool reuse_initial_tab) {
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
-    if (app->adblock_filter) {
-        webkit_user_content_manager_add_filter(ucm, app->adblock_filter);
+    if (g_adblock_filters) {
+        for (guint f = 0; f < g_adblock_filters->len; ++f) {
+            webkit_user_content_manager_add_filter(
+                ucm, (WebKitUserContentFilter *)g_ptr_array_index(g_adblock_filters, f));
+        }
     }
     install_page_diagnostics(ucm);
 
@@ -1391,9 +2701,11 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     }
     webkit_web_context_set_cache_model(web_context, WEBKIT_CACHE_MODEL_WEB_BROWSER);
 
-    /* Start compiling the blocker rules before the first page loads; the filter
-     * arrives asynchronously and is attached to the tab created further down. */
-    adblock_init(no_adblock);
+    /* Start ad blocking before the first page loads: warm-start the cached
+     * release (or compile the built-in rules), then refresh the list in the
+     * background. The filter arrives asynchronously and is attached to the tab
+     * created further down. */
+    adblock_startup(no_adblock);
 
     g_signal_connect(web_context, "download-started", G_CALLBACK(on_download_started), &g_app);
 
@@ -1487,6 +2799,7 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
 
     gtk_main();
 
+    adblock_shutdown();
     zephium_browser_free(g_app.core);
     return 0;
 }
@@ -1508,6 +2821,12 @@ static void print_usage(const char *prog) {
     printf("  --screenshot <file> Save a PNG of the rendered page and exit\n");
     printf("  --screenshot-delay  Seconds to wait before the screenshot (default 8)\n");
     printf("  --no-adblock        Disable the content filter (same as ZEPHIUM_ADBLOCK=0)\n");
+    printf("  --adblock-status    Print the cached filter-list state and exit\n");
+    printf("\nEnvironment:\n");
+    printf("  ZEPHIUM_ADBLOCK=0            Disable ad blocking for this run\n");
+    printf("  ZEPHIUM_ADBLOCK_DIR=<dir>    Override the filter-list cache directory\n");
+    printf("  ZEPHIUM_ADBLOCK_MODE=lists   Compile individual lists instead of combined parts\n");
+    printf("  ZEPHIUM_ADBLOCK_URL_BASE=<url> Override the release asset base URL (testing)\n");
 }
 
 static int run_cli_browser(const char *initial_url) {
@@ -1637,6 +2956,7 @@ int main(int argc, char **argv) {
     bool force_x11 = false;
     bool force_wayland = false;
     bool no_adblock = false;
+    bool adblock_status = false;
     const char *screenshot_path = NULL;
     int screenshot_delay = 8;
 
@@ -1664,6 +2984,8 @@ int main(int argc, char **argv) {
             force_wayland = true;
         } else if (strcmp(argv[i], "--no-adblock") == 0) {
             no_adblock = true;
+        } else if (strcmp(argv[i], "--adblock-status") == 0) {
+            adblock_status = true;
         } else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             screenshot_path = argv[++i];
         } else if (strcmp(argv[i], "--screenshot-delay") == 0 && i + 1 < argc) {
@@ -1679,6 +3001,10 @@ int main(int argc, char **argv) {
 
     bool on_wsl = force_wsl || is_running_on_wsl();
     apply_wsl_optimizations(force_wsl, disable_gpu, force_x11, force_wayland);
+
+    if (adblock_status) {
+        return run_adblock_status();
+    }
 
 #if defined(__linux__) && defined(ZEPHIUM_ENABLE_WEBKITGTK)
     if (!headless && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))) {

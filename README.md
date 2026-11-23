@@ -35,7 +35,8 @@ cd C:\path\to\zephium-c\windows
 .\zephium_win.exe --tab-sleep 0 https://example.com    # tắt ngủ đông
 ```
 
-- `WebView2Loader.dll` phải nằm cạnh exe (đã có sẵn trong repo).
+- `WebView2Loader.dll` phải nằm cạnh exe; lấy `zephium_win.exe` + `WebView2Loader.dll`
+  từ mục **Releases** của repo (xem *Binaries* trong §4), hoặc tự build từ source.
 - Exe chưa ký số → SmartScreen có thể hỏi: *More info → Run anyway*.
 - Phím tắt: `Ctrl+T` tab mới · `Ctrl+W` đóng tab · `Ctrl+Tab`/`Ctrl+Shift+Tab` chuyển tab ·
   `Ctrl+L` focus ô địa chỉ · `F5` tải lại · `Ctrl++`/`Ctrl+-` zoom.
@@ -79,9 +80,9 @@ hình nền ASCII động, omnibox ở giữa màn hình, 6 shortcut, đồng h�
   ```
   Cần clang có target `wasm32`, Node và gcc; không cần npm. Chi tiết:
   [`newtab/README.md`](newtab/README.md).
-- Nếu `zephium_win.exe` đang chạy (file bị khoá), bản build sẵn
-  `windows\zephium_win_newtab.exe` dùng được ngay; hoặc đóng trình duyệt rồi
-  `mingw32-make`.
+- Nếu `zephium_win.exe` đang chạy, Windows khoá file exe: đóng cửa sổ đó rồi
+  `mingw32-make` lại (không còn bản binary "dùng ngay" nào trong repo — xem
+  *Binaries* trong §4).
 
 ### WSL (WebKitGTK)
 
@@ -159,7 +160,8 @@ zephium-c/
 ├── geometry/           # Point, Size, Rect tính toán giao diện
 ├── ids/                # 128-bit ULID Crockford-32 định danh Tabs/Windows
 ├── navigation/         # URL Classification, Search fallback, SSRF & Local host protection
-├── store/              # SQLite3 WAL store (Bookmarks, History, Downloads, Preferences)
+├── store/              # SQLite3 WAL store (Bookmarks, History, Downloads, Preferences;
+│                       #   API liệt kê/tìm kiếm + tiến độ tải, xem store/port.h)
 ├── zoom/               # Điều khiển zoom cấp số nhân rời rạc
 ├── newtab/             # Start page: ASCII wallpaper (C17 → wasm) + omnibox giữa màn hình
 │   ├── ascii_core.c    #   core C17 sinh cảnh ASCII (không libc)
@@ -171,16 +173,15 @@ zephium-c/
 │   ├── zephium_win.cpp #   host window + toolbar + tab strip (C++17, COM)
 │   ├── Makefile        #   build bằng mingw32-make
 │   ├── fetch_sdk.ps1   #   tải WebView2 SDK vào windows/sdk (không commit)
-│   ├── zephium_win.exe #   binary prebuilt
-│   └── WebView2Loader.dll
+│   └── (zephium_win.exe, WebView2Loader.dll: build output, tải từ Releases)
 ├── main.c              # Entry point: Linux WebKitGTK 4.1 Shell + Cross-platform CLI REPL
 ├── read_log.py         # Đọc/chẩn đoán log WebKit + GStreamer + lỗi JS của trang
 ├── CMakeLists.txt      # Cấu hình build đa nền tảng (CMake 3.16+)
 ├── Makefile            # Makefile cho MinGW / GCC / Clang
 ├── setup_wsl.sh        # Script tự động cài dependencies trên WSL
 ├── run_wsl.sh          # Script tối ưu chạy trên WSLg
-├── zephium_gcc.exe     # Binary CLI prebuilt (GCC 14+)
-└── zephium_clang.exe   # Binary CLI prebuilt (Clang 19+)
+├── zephium_gcc.exe     # CLI binary - KHÔNG commit, tải từ GitHub Releases
+└── zephium_clang.exe   # CLI binary - KHÔNG commit, tải từ GitHub Releases
 ```
 
 ---
@@ -319,7 +320,19 @@ ghi vì không phải exception.
 
 ## 4. Kiểm thử trên Windows (MinGW-w64)
 
-### Chạy binary có sẵn:
+### Binaries: GitHub Releases, không commit vào git
+
+Không còn file binary nào trong git: `.gitignore` bỏ qua `*.exe` và `*.dll`. Các artifact
+được phát hành qua **GitHub Releases** — tải release khớp với tag bạn cần rồi đặt file vào
+đúng chỗ:
+
+| Artifact | Vị trí khi chạy |
+|---|---|
+| `zephium_gcc.exe`, `zephium_clang.exe` | gốc repo (CLI `--headless`/`--batch`) |
+| `zephium_win.exe`, `WebView2Loader.dll` | cạnh nhau trong `windows\` (shell WebView2) |
+
+Build từ source cho ra đúng những binary đó (xem §0 và §5).
+
 ```powershell
 .\zephium_gcc.exe --headless
 # hoặc
@@ -356,6 +369,15 @@ Hoặc truyền trực tiếp: `mingw32-make CC_GCC=gcc SQLITE_LIBS=-lsqlite3 ga
 Binary được build với `-ffile-prefix-map`, nên không nhúng đường dẫn tuyệt đối của máy
 build (kiểm tra: `strings build/zephium | grep -i <tên-user>` phải không ra kết quả).
 
+### CI (Ubuntu)
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) chạy trên `ubuntu-latest`: cài
+`libsqlite3-dev`, build 7 module portable với `-Werror` rồi replay toàn bộ `cases.jsonl` của
+từng module qua `harness/diff_runner.c` (zoom, geometry, ids, navigation, blocker, store,
+browser_core). Không cần GUI, CMake hay MinGW — chạy lại trên Ubuntu/WSL bằng khối lệnh
+"Build modules and run harnesses" trong workflow (chỉ cần `sudo apt-get install -y
+libsqlite3-dev` trước đó).
+
 ---
 
 ## 5. Shell đồ họa cho Windows (Win32 + WebView2)
@@ -378,5 +400,22 @@ active hoặc đang phát audio thì không bao giờ bị ngủ. Đo trên 4 ta
 
 Chi tiết (yêu cầu, kiến trúc, phím tắt, giới hạn): [windows/README.md](windows/README.md).
 
-Nhanh gọn: `zephium_win.exe` + `WebView2Loader.dll` đã build sẵn trong `windows/`,
-chỉ cần máy có Microsoft Edge WebView2 Runtime (Windows 11 mặc định có).
+**Popup, tải file, quyền**: `target="_blank"`/`window.open` mở thành tab mới (URL vẫn phải
+qua `zephium_nav_is_allowed`, giống ô địa chỉ); file tải về thư mục **Downloads** của user
+với tên đã làm sạch và được ghi vào bảng `downloads`; mọi permission (camera, micro, vị trí,
+thông báo, clipboard, …) bị **từ chối mặc định**, chỉ **autoplay** (phát media) được cho phép.
+
+> Các handler này mới được **biên dịch**, chưa chạy thử trên Windows trong môi trường phát
+> triển hiện tại — xem ghi chú *Chưa xác minh* ở cuối mục.
+
+Nhanh gọn: tải `zephium_win.exe` + `WebView2Loader.dll` từ mục **Releases** (hoặc build bằng
+`mingw32-make` trong `windows/`), chỉ cần máy có Microsoft Edge WebView2 Runtime
+(Windows 11 mặc định có).
+
+### Chưa xác minh (Windows shell)
+
+Trong môi trường phát triển hiện tại chỉ **compile** được shell Windows: chạy nó cần desktop
++ WebView2, và các handler ở trên cần thao tác người dùng (click popup, tải file, prompt
+quyền). Vì vậy **chưa có bằng chứng runtime** cho: popup mở tab + kiểm tra allow-list, tên
+file tải về + bản ghi trong bảng `downloads`, và việc từ chối permission. Phần Linux/WSL
+(§2, §3) thì đã được chạy và chụp ảnh kiểm chứng.

@@ -2,9 +2,10 @@
 build/
 *.o
 *.exe
-# Prebuilt demo binaries are shipped on purpose (see README)
-!zephium_gcc.exe
-!zephium_clang.exe
+*.dll
+# Binaries (zephium_gcc.exe, zephium_clang.exe, windows/zephium_win.exe,
+# windows/WebView2Loader.dll) are published as GitHub Releases - never committed.
+# See "Binaries" in README.md.
 *.d
 CMakeFiles/
 CMakeCache.txt
@@ -33,8 +34,6 @@ windows/*.png
 windows/WebView2*.zip
 windows/zephium_webview2_profile/
 windows/*.WebView2/
-!windows/zephium_win.exe
-!windows/WebView2Loader.dll
 
 # ---- Local scratch ----
 .tmp_*

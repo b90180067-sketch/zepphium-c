@@ -2,117 +2,46 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build-and-test:
-    name: build-and-test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
+  portable-modules:
+    name: Portable modules + harnesses (Ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare APT cache directory (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo mkdir -p /var/cache/apt/archives
-          sudo chown "$USER" /var/cache/apt/archives
-
-      - name: Cache APT packages (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-apt-
-
-      - name: Set up MSYS2 (Windows)
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-sqlite3
-
-      - name: Cache pacman packages (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: C:/msys64/var/cache/pacman/pkg
-          key: ${{ runner.os }}-pacman-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-pacman-
-
-      - name: Cache CMake build
-        uses: actions/cache@v4
-        with:
-          path: build
-          key: ${{ runner.os }}-cmake-${{ hashFiles('CMakeLists.txt', 'Makefile', '**/*.c', '**/*.h') }}
-          restore-keys: |
-            ${{ runner.os }}-cmake-
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Install SQLite3 development files
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            ninja-build \
-            pkg-config \
-            libsqlite3-dev \
-            libwebkit2gtk-4.1-dev
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev
 
-      - name: Configure (Linux)
-        if: runner.os == 'Linux'
-        run: >-
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DZEPHIUM_WERROR=ON
+      # Every module is compiled with the project's warning set (-Werror) and its
+      # recorded cases are replayed by <module>/harness/diff_runner.c.
+      - name: Build modules and run harnesses
+        run: |
+          set -euo pipefail
+          CFLAGS="-std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -Wformat=2 -Werror -O2"
+          SQLITE_CFLAGS="$(pkg-config --cflags sqlite3)"
+          SQLITE_LIBS="$(pkg-config --libs sqlite3)"
 
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: >-
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=gcc
-          -DZEPHIUM_WERROR=ON
-          -DCMAKE_PREFIX_PATH="$(cygpath -m "$MINGW_PREFIX")"
+          run_harness() {
+            unit="$1"; shift
+            gcc $CFLAGS -I. $SQLITE_CFLAGS "$@" "$unit/harness/diff_runner.c" \
+                $SQLITE_LIBS -lm -o "/tmp/harness-$unit"
+            ( cd "$unit" && "/tmp/harness-$unit" cases.jsonl )
+          }
 
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
-        run: cmake --build build --config Release
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: cmake --build build --config Release
-
-      - name: Test (Linux)
-        if: runner.os == 'Linux'
-        run: ctest --test-dir build --output-on-failure -C Release
-
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: ctest --test-dir build --output-on-failure -C Release
+          run_harness zoom         zoom/port.c
+          run_harness geometry     geometry/port.c
+          run_harness ids          ids/port.c
+          run_harness navigation   navigation/port.c
+          run_harness blocker      blocker/port.c
+          run_harness store        store/port.c
+          run_harness browser_core browser_core/port.c zoom/port.c geometry/port.c \
+              ids/port.c navigation/port.c blocker/port.c store/port.c

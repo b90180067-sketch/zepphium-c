@@ -97,6 +97,21 @@ static bool is_running_on_wsl(void) {
     return false;
 }
 
+#if defined(__linux__)
+/* The WebKit sandbox is enabled by default. ZEPHIUM_NO_SANDBOX=1 is the single
+ * opt-out, and it exists only for hosts where WebKit's bubblewrap launcher
+ * cannot start (some WSL2 kernels refuse unprivileged user namespaces). WebKit's
+ * own escape-hatch variable is still honoured, so a shell that exports it gets
+ * the warning below instead of silently running unsandboxed. */
+static bool zephium_sandbox_disabled(void) {
+    const char *opt_out = getenv("ZEPHIUM_NO_SANDBOX");
+    if (opt_out && strcmp(opt_out, "1") == 0) return true;
+
+    const char *webkit_var = getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
+    return webkit_var && *webkit_var && strcmp(webkit_var, "0") != 0;
+}
+#endif /* __linux__ */
+
 /* GStreamer autoplugs NVIDIA (NVDEC) and VA-API video decoders before the CPU
  * ones. On WSLg the CUDA stack is incomplete (libnvrtc is missing) and Mesa runs
  * on llvmpipe, so those elements cannot create a GL context: the first frame
@@ -132,8 +147,13 @@ static void apply_wsl_optimizations(bool force_wsl, bool disable_gpu, bool force
     if (on_wsl) {
         printf("[Zephium] WSL/WSLg environment detected: applying compatibility tuning...\n");
 
-        /* 1. Disable WebKit bubblewrap sandbox because WSL2 lacks unprivileged user namespace mounting */
-        setenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1", 0);
+        /* 1. Keep WebKit's bubblewrap sandbox on. Some WSL2 kernels cannot create
+         * unprivileged user namespaces, which is why this used to be disabled
+         * unconditionally - but the sandbox is a security boundary, so disabling
+         * it is an explicit opt-out (ZEPHIUM_NO_SANDBOX=1) with a warning. */
+        if (zephium_sandbox_disabled()) {
+            setenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1", 1);
+        }
 
         /* 2. Keep accelerated compositing AND the DMA-BUF renderer enabled.
          * WebKitGTK >= 2.4x delivers decoded video frames to the UI process through
@@ -567,13 +587,38 @@ static gboolean on_decide_policy(WebKitWebView *web_view,
     return FALSE;
 }
 
+#define ZEPHIUM_PERMISSION_DENIAL_LOG_LIMIT 20
+static unsigned g_denied_permissions = 0;
+
+/* Permission requests are denied by default. Encrypted Media Extensions (EME)
+ * is the only one granted: it is required to play DRM-protected media, it
+ * exposes no device, and the renderer cannot use it without the page already
+ * having asked for it. Camera, microphone, geolocation, notifications, pointer
+ * lock, XR, clipboard, device information and cross-site data access are all
+ * refused, so a page cannot reach the user's hardware, location or other sites
+ * - the browser never had a prompt to ask for them. The legacy "install missing
+ * media plugins" request is refused too: granting it would let any page start a
+ * system package installation; the denial is logged so the cause is visible. */
 static gboolean on_permission_request(WebKitWebView *web_view,
                                       WebKitPermissionRequest *request,
                                       gpointer user_data) {
     (void)web_view;
     (void)user_data;
-    /* Automatically allow media playback / EME permission requests */
-    webkit_permission_request_allow(request);
+
+    if (WEBKIT_IS_MEDIA_KEY_SYSTEM_PERMISSION_REQUEST(request)) {
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    /* Log the first few refusals: without a trace, a site that silently loses the
+     * camera looks like a Zephium bug. The cap stops a page from flooding the log
+     * by requesting a permission in a loop. */
+    if (g_denied_permissions < ZEPHIUM_PERMISSION_DENIAL_LOG_LIMIT) {
+        ++g_denied_permissions;
+        zephium_log("INFO", "PERMISSION_DENIED", "Denied permission request: %s",
+                    G_OBJECT_TYPE_NAME(request));
+    }
+    webkit_permission_request_deny(request);
     return TRUE;
 }
 
@@ -850,9 +895,17 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
     }
 
     WebKitWebContext *web_context = webkit_web_context_get_default();
-    if (is_wsl) {
-        /* Crucial: disable WebKit bubblewrap sandbox in WSL to prevent bwrap permission crashes */
+    /* The WebKit sandbox is a security boundary and stays enabled. It used to be
+     * turned off whenever WSL was detected, which removed the process isolation
+     * from every page for the whole session; the opt-out is now explicit. */
+    if (zephium_sandbox_disabled()) {
         webkit_web_context_set_sandbox_enabled(web_context, FALSE);
+        zephium_log("WARN", "SANDBOX",
+                    "WebKit sandbox DISABLED (ZEPHIUM_NO_SANDBOX=1): web content runs with the "
+                    "full privileges of your user account. Unset ZEPHIUM_NO_SANDBOX to restore "
+                    "the sandbox.");
+    } else {
+        webkit_web_context_set_sandbox_enabled(web_context, TRUE);
     }
     webkit_web_context_set_cache_model(web_context, WEBKIT_CACHE_MODEL_WEB_BROWSER);
 

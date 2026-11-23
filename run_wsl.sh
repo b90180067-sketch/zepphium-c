@@ -31,8 +31,13 @@ fi
 export GDK_BACKEND="x11"
 
 # 4. WebKitGTK WSL Sandboxing, DMA-BUF & Compositing
-# Disable bubblewrap sandbox in WSL2 kernel due to unprivileged mount restrictions
-export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+# The WebKit (bubblewrap) sandbox stays ENABLED. It is a security boundary, so the
+# browser no longer turns it off just because it runs under WSL. Only if this
+# kernel refuses unprivileged user namespaces (WebKit fails to start, bwrap errors
+# in the log) opt out explicitly - the browser then prints a loud warning:
+#   ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh https://duckduckgo.com
+# Do not export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS here: ZEPHIUM_NO_SANDBOX
+# is the single switch and main.c sets that variable itself.
 
 # Do NOT export WEBKIT_DISABLE_COMPOSITING_MODE / WEBKIT_DISABLE_DMABUF_RENDERER:
 # WebKitGTK >= 2.4x presents decoded video frames through the accelerated

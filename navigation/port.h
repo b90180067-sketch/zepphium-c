@@ -38,7 +38,8 @@ bool zephium_nav_search_query(const char *input, size_t input_len, char *out_url
 
 /**
  * Gate for whether a URL is allowed to commit in a browser tab.
- * Allows exact "about:blank" and clean http(s) URLs without credentials and not targeting reserved hosts.
+ * Allows exact "about:blank" and clean http(s) URLs that carry no credentials, do not target a
+ * reserved host, and do not reach loopback / private / link-local addresses or "localhost".
  */
 bool zephium_nav_is_allowed(const char *url_str, size_t len);
 

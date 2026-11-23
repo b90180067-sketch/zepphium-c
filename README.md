@@ -29,7 +29,7 @@ reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A
 ```powershell
 cd C:\Users\offli\zephium-c\windows
 
-.\zephium_win.exe                                      # mở duckduckgo
+.\zephium_win.exe                                      # mở tab mới (ASCII start page)
 .\zephium_win.exe https://grokipedia.com               # mở URL
 .\zephium_win.exe --tab-sleep 10 https://youtube.com   # tab ngủ đông sau 10 phút
 .\zephium_win.exe --tab-sleep 0 https://example.com    # tắt ngủ đông
@@ -44,8 +44,44 @@ cd C:\Users\offli\zephium-c\windows
   ```powershell
   cd C:\Users\offli\zephium-c\windows
   powershell -ExecutionPolicy Bypass -File fetch_sdk.ps1   # tải WebView2 SDK (lần đầu)
-  mingw32-make
+  mingw32-make                                             # build exe + copy newtab/
   ```
+
+### Màn hình tab mới (ASCII start page)
+
+![Zephium new tab](newtab/preview.png)
+
+Cùng bộ chrome tối khi đang duyệt một trang thật (YouTube):
+
+![Zephium dark chrome while browsing](newtab/preview-browsing.png)
+
+`Ctrl+T` — và lần khởi động không truyền URL — mở một start page full-bleed:
+hình nền ASCII động, omnibox ở giữa màn hình, 6 shortcut, đồng hồ và 3 cảnh
+(Vịnh trăng / Bình minh / Cực quang).
+
+- **Core là C17**: toàn bộ địa hình, mặt nước, sao, mặt trăng và cực quang được
+  sinh trong `newtab/ascii_core.c`, biên dịch freestanding sang WebAssembly
+  (`newtab/ascii_core.wasm`, ~20 KB, không import). JavaScript chỉ đọc buffer
+  `uint16_t` và vẽ glyph màu lên canvas.
+- **Dựa trên bộ ascii.rest**: dùng font Paper Mono và ngôn ngữ hình ảnh ASCII của
+  file zip; các đỉnh núi được "vẽ" thủ công (vị trí/độ cao/độ dốc), không phải
+  noise ngẫu nhiên.
+- **Tích hợp shell**: WebView2 map host `newtab.zephium` vào thư mục
+  `newtab/`; khi start page active, hàng toolbar Win32 được ẩn để nội dung
+  full-bleed. Toàn bộ chrome — title bar (DWM), tab strip và toolbar — luôn dùng
+  tông tối với accent mint, kể cả khi tab đang mở YouTube hay một trang sáng;
+  các nút back/forward/reload/zoom và ô địa chỉ được owner-draw để không còn
+  mảng trắng Win32 cũ. Omnibox gửi `navigate|<input>` về shell, shell phân loại
+  URL/search bằng core C17 `navigation` rồi điều hướng tab.
+- **Build core**:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File newtab\build.ps1
+  ```
+  Cần clang có target `wasm32`, Node và gcc; không cần npm. Chi tiết:
+  [`newtab/README.md`](newtab/README.md).
+- Nếu `zephium_win.exe` đang chạy (file bị khoá), bản build sẵn
+  `windows\zephium_win_newtab.exe` dùng được ngay; hoặc đóng trình duyệt rồi
+  `mingw32-make`.
 
 ### WSL (WebKitGTK)
 
@@ -65,6 +101,18 @@ Các cờ hữu ích:
 | `--screenshot <file> --screenshot-delay N` | chụp ảnh trang đang render rồi thoát |
 | `--headless` | REPL/CLI khi không có màn hình |
 
+**Sandbox WebKit**: sandbox WebProcess (bubblewrap) **bật mặc định**, kể cả trên WSL.
+Chỉ tắt khi kernel WSL2 không cấp được unprivileged user namespace (WebKit không khởi
+động, log có lỗi `bwrap`):
+
+```bash
+ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh https://duckduckgo.com
+```
+
+Khi tắt, browser in cảnh báo `[WARN] [SANDBOX] WebKit sandbox DISABLED (...)` — trang web
+chạy với toàn bộ quyền của user, nên chỉ dùng khi thật cần. `run_wsl.sh` không còn export
+`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS`; `ZEPHIUM_NO_SANDBOX=1` là công tắc duy nhất.
+
 Kiểm tra sau khi chạy: `python3 read_log.py` (các mục `[RENDER]`, `[MEDIA]`, `[PAGE]`).
 Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zephium --headless` (REPL).
 
@@ -77,6 +125,7 @@ Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zeph
 | WSL: cửa sổ trắng / site không hiện UI | `./run_wsl.sh --screenshot /tmp/page.png --screenshot-delay 20 <url>` rồi xem `python3 read_log.py` |
 | WSL: video YouTube không phát | Không tắt compositing/DMABUF (bản này đã xử lý); xem mục *Sự cố đã biết* bên dưới |
 | WSL chậm, tụt FPS | Kiểm tra `ls /dev/dri`: không có `renderD128` thì đang render bằng CPU — xem mục **Hiệu năng** |
+| WSL: WebKit không khởi động, log có lỗi `bwrap` / sandbox | Kernel thiếu unprivileged user namespace: chạy `ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh <url>` (sandbox tắt, có cảnh báo `[SANDBOX]`) |
 
 ---
 
@@ -91,6 +140,12 @@ zephium-c/
 ├── navigation/         # URL Classification, Search fallback, SSRF & Local host protection
 ├── store/              # SQLite3 WAL store (Bookmarks, History, Downloads, Preferences)
 ├── zoom/               # Điều khiển zoom cấp số nhân rời rạc
+├── newtab/             # Start page: ASCII wallpaper (C17 → wasm) + omnibox giữa màn hình
+│   ├── ascii_core.c    #   core C17 sinh cảnh ASCII (không libc)
+│   ├── build.ps1       #   build wasm + base64 fallback + demo terminal
+│   ├── index.html      #   markup, icon sprite
+│   ├── newtab.css/js   #   giao diện, canvas, omnibox, clock, scene switch
+│   └── fonts/          #   Paper Mono (OFL) từ bộ ascii.rest
 ├── windows/            # Shell native Windows (Win32 + WebView2): multi-tab, tab ngủ đông
 │   ├── zephium_win.cpp #   host window + toolbar + tab strip (C++17, COM)
 │   ├── Makefile        #   build bằng mingw32-make
@@ -146,6 +201,11 @@ chmod +x setup_wsl.sh run_wsl.sh
 - **Chế độ Headless / CLI REPL (khi kết nối qua SSH hoặc terminal thuần)**:
   ```bash
   ./build/zephium --headless
+  ```
+- **Tắt sandbox WebKit** (mặc định **bật**; chỉ dùng khi kernel WSL2 không hỗ trợ
+  unprivileged user namespace):
+  ```bash
+  ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh https://duckduckgo.com
   ```
 
 ### Sự cố đã biết: video YouTube không phát được trên WSLg

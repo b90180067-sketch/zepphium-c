@@ -186,6 +186,18 @@ static const GUID kIID_AccelHandler = {0xb29c7e28, 0xfa79, 0x41a8,
                                        {0x8e, 0x44, 0x65, 0x81, 0x1c, 0x76, 0xdc, 0xb2}};
 static const GUID kIID_WebView2_8 = {0xe9632730, 0x6e1e, 0x43ab,
                                      {0xb7, 0xb8, 0x7b, 0x2c, 0x9e, 0x62, 0xe0, 0x94}};
+/* Browser extensions (WebView2 1.0.2210.55+): the environment option that turns
+ * the feature on, the profile that accepts an unpacked extension, and the wait
+ * handler for it. */
+static const GUID kIID_EnvOptions6 = {0x57d29cc3, 0xc84f, 0x42a0,
+                                     {0xb0, 0xe2, 0xef, 0xfb, 0xd5, 0xe1, 0x79, 0xde}};
+static const GUID kIID_WebView2_13 = {0xf75f09a8, 0x667e, 0x4983,
+                                     {0x88, 0xd6, 0xc8, 0x77, 0x3f, 0x31, 0x5e, 0x84}};
+static const GUID kIID_Profile7 = {0x7b4c7906, 0xa1aa, 0x4cb4,
+                                  {0xb7, 0x23, 0xdb, 0x09, 0xf8, 0x13, 0xd5, 0x41}};
+static const GUID kIID_ExtensionHandler = {0xdf1aab27, 0x82b9, 0x4ab6,
+                                          {0xaa, 0xe8, 0x01, 0x7a, 0x49, 0x39, 0x8c, 0x14}};
+
 
 static bool GuidEq(REFIID a, const GUID &b) {
     return memcmp(&a, &b, sizeof(GUID)) == 0;
@@ -227,13 +239,40 @@ static HRESULT CoStrDup(const std::wstring &src, LPWSTR *out) {
     return S_OK;
 }
 
-class ZephiumEnvOptions : public ZephiumCom<ICoreWebView2EnvironmentOptions, &kIID_EnvOptions> {
+/* Environment options. ICoreWebView2EnvironmentOptions carries the Chromium
+ * switches; ICoreWebView2EnvironmentOptions6 is what turns the browser-extension
+ * feature on, and WebView2 only uses it if this same object answers QueryInterface
+ * for it, so the class implements both interfaces. */
+class ZephiumEnvOptions : public ICoreWebView2EnvironmentOptions,
+                          public ICoreWebView2EnvironmentOptions6 {
 public:
     /* Must match the SDK: an empty TargetCompatibleBrowserVersion makes
      * CreateCoreWebView2EnvironmentWithOptions fail with E_INVALIDARG. */
     static constexpr wchar_t kTargetVersion[] = L"158.0.4370.26";
 
-    explicit ZephiumEnvOptions(const std::wstring &args) : m_args(args), m_version(kTargetVersion) {}
+    ZephiumEnvOptions(const std::wstring &args, bool extensions_enabled)
+        : m_args(args), m_version(kTargetVersion), m_extensions(extensions_enabled ? TRUE : FALSE) {}
+    virtual ~ZephiumEnvOptions() = default;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (GuidEq(riid, kIID_IUnknown_) || GuidEq(riid, kIID_EnvOptions)) {
+            *ppv = static_cast<ICoreWebView2EnvironmentOptions *>(this);
+        } else if (GuidEq(riid, kIID_EnvOptions6)) {
+            *ppv = static_cast<ICoreWebView2EnvironmentOptions6 *>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&m_ref); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG r = InterlockedDecrement(&m_ref);
+        if (r == 0) delete this;
+        return (ULONG)r;
+    }
 
     HRESULT STDMETHODCALLTYPE get_AdditionalBrowserArguments(LPWSTR *value) override {
         return CoStrDup(m_args, value);
@@ -264,11 +303,23 @@ public:
         return S_OK;
     }
 
+    HRESULT STDMETHODCALLTYPE get_AreBrowserExtensionsEnabled(BOOL *value) override {
+        if (!value) return E_POINTER;
+        *value = m_extensions;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE put_AreBrowserExtensionsEnabled(BOOL value) override {
+        m_extensions = value;
+        return S_OK;
+    }
+
 private:
     std::wstring m_args;
     std::wstring m_lang;
     std::wstring m_version;
     BOOL m_sso = FALSE;
+    BOOL m_extensions = FALSE;
+    volatile LONG m_ref = 1;
 };
 
 /* ------------------------------------------------------------- tab helpers */
@@ -618,6 +669,104 @@ private:
     std::string m_id;
 };
 
+/* ------------------------------------------------------------- extensions */
+
+/* Ad blocking on Windows rides on the WebView2 browser-extension feature: an
+ * unpacked content blocker (uBlock Origin Lite, AdGuard, ...) is loaded from
+ * windows/extensions/<folder>. Nothing is bundled here - the user installs the
+ * extension - and a failure only costs ad blocking, never browsing. */
+static bool g_extensions_enabled = true;
+static bool g_extensions_requested = false;
+
+class ZephiumExtensionHandler
+    : public ZephiumCom<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler, &kIID_ExtensionHandler> {
+public:
+    explicit ZephiumExtensionHandler(std::wstring name) : m_name(std::move(name)) {}
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2BrowserExtension *extension) override;
+
+private:
+    std::wstring m_name;
+};
+
+HRESULT STDMETHODCALLTYPE ZephiumExtensionHandler::Invoke(HRESULT result,
+                                                          ICoreWebView2BrowserExtension *extension) {
+    if (FAILED(result) || !extension) {
+        Log(L"extension failed: %ls (0x%08lx)", m_name.c_str(), (unsigned long)result);
+        return S_OK;
+    }
+
+    std::wstring name, id;
+    LPWSTR value = nullptr;
+    if (SUCCEEDED(extension->get_Name(&value)) && value) {
+        name.assign(value);
+        CoTaskMemFree(value);
+        value = nullptr;
+    }
+    if (SUCCEEDED(extension->get_Id(&value)) && value) {
+        id.assign(value);
+        CoTaskMemFree(value);
+    }
+    Log(L"extension loaded: %ls (id=%ls) from %ls", name.c_str(), id.c_str(), m_name.c_str());
+    return S_OK;
+}
+
+/* Adds every unpacked extension folder under windows/extensions/ to the default
+ * profile. Runs once, on the first CoreWebView2 that exists. */
+static void LoadBrowserExtensions(ICoreWebView2 *view) {
+    if (!g_extensions_enabled || g_extensions_requested || !view) return;
+    g_extensions_requested = true;
+
+    ICoreWebView2_13 *view13 = nullptr;
+    if (FAILED(view->QueryInterface(kIID_WebView2_13, (void **)&view13)) || !view13) {
+        Log(L"extensions: ICoreWebView2_13 missing, ad blocking not loaded");
+        return;
+    }
+    ICoreWebView2Profile *profile = nullptr;
+    HRESULT hr = view13->get_Profile(&profile);
+    view13->Release();
+    if (FAILED(hr) || !profile) {
+        Log(L"extensions: no profile (0x%08lx), ad blocking not loaded", (unsigned long)hr);
+        return;
+    }
+
+    ICoreWebView2Profile7 *profile7 = nullptr;
+    hr = profile->QueryInterface(kIID_Profile7, (void **)&profile7);
+    profile->Release();
+    if (FAILED(hr) || !profile7) {
+        Log(L"extensions: ICoreWebView2Profile7 missing (0x%08lx), ad blocking not loaded",
+            (unsigned long)hr);
+        return;
+    }
+
+    std::wstring root = g_exe_dir + L"\\extensions";
+    WIN32_FIND_DATAW entry = {};
+    HANDLE find = FindFirstFileW((root + L"\\*").c_str(), &entry);
+    if (find == INVALID_HANDLE_VALUE) {
+        Log(L"extensions: no extensions folder next to the exe, ad blocking not loaded");
+        profile7->Release();
+        return;
+    }
+
+    int requested = 0;
+    do {
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+        if (wcscmp(entry.cFileName, L".") == 0 || wcscmp(entry.cFileName, L"..") == 0) continue;
+
+        std::wstring folder = root + L"\\" + entry.cFileName;
+        if (GetFileAttributesW((folder + L"\\manifest.json").c_str()) == INVALID_FILE_ATTRIBUTES) {
+            Log(L"extension skipped (no manifest.json): %ls", entry.cFileName);
+            continue;
+        }
+        hr = profile7->AddBrowserExtension(folder.c_str(),
+                                           new ZephiumExtensionHandler(entry.cFileName));
+        Log(L"extension add requested: %ls (0x%08lx)", entry.cFileName, (unsigned long)hr);
+        ++requested;
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+    profile7->Release();
+    Log(L"extensions: %d folder(s) requested", requested);
+}
+
 /* ------------------------------------------------------------- tab control */
 static void CreateTabController(int index);
 
@@ -852,6 +1001,9 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
         Log(L"get_CoreWebView2 failed for tab id=%d", m_tab_id);
         return S_OK;
     }
+
+    /* First tab only: the profile is shared, so the extensions are added once. */
+    LoadBrowserExtensions(tab->view);
 
     ICoreWebView2Settings *settings = nullptr;
     if (SUCCEEDED(tab->view->get_Settings(&settings)) && settings) {
@@ -1285,11 +1437,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     Log(L"---- Zephium Windows shell starting ----");
     RestrictFileToOwner(g_log_path);
 
+    /* Ad blocking is on unless the environment or the command line turns it off;
+     * the switch only controls whether the extension folders are loaded. */
+    const wchar_t *adblock_env = _wgetenv(L"ZEPHIUM_ADBLOCK");
+    if (adblock_env && wcscmp(adblock_env, L"0") == 0) g_extensions_enabled = false;
+
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring initial = L"https://duckduckgo.com";
     for (int i = 1; argv && i < argc; ++i) {
-        if (wcscmp(argv[i], L"--tab-sleep") == 0 && i + 1 < argc) {
+        if (wcscmp(argv[i], L"--no-adblock") == 0) {
+            g_extensions_enabled = false;
+        } else if (wcscmp(argv[i], L"--tab-sleep") == 0 && i + 1 < argc) {
             g_sleep_seconds = _wtoi(argv[++i]) * 60;
             if (g_sleep_seconds < 0) g_sleep_seconds = 0;
         } else if (wcscmp(argv[i], L"--tab-sleep-seconds") == 0 && i + 1 < argc) {
@@ -1302,6 +1461,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     if (argv) LocalFree(argv);
     g_initial_url = initial;
     Log(L"tab hibernation: %d seconds (0 = off)", g_sleep_seconds);
+    Log(L"ad blocking: %ls", g_extensions_enabled ? L"enabled (browser extensions)"
+                                                  : L"disabled (--no-adblock / ZEPHIUM_ADBLOCK=0)");
 
     std::string db_path = WideToUtf8(g_exe_dir + L"\\zephium_profile.db");
     g_core = zephium_browser_init(db_path.c_str());
@@ -1386,7 +1547,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         }
     };
 
-    ZephiumEnvOptions *options = new ZephiumEnvOptions(ZEPHIUM_WEBVIEW2_ARGS);
+    ZephiumEnvOptions *options = new ZephiumEnvOptions(ZEPHIUM_WEBVIEW2_ARGS, g_extensions_enabled);
     HRESULT hr = create_env(nullptr, user_data.c_str(), options, new EnvHandler());
     options->Release();
     if (FAILED(hr)) {

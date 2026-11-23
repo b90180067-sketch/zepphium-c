@@ -35,6 +35,10 @@ windows/WebView2*.zip
 windows/zephium_webview2_profile/
 windows/*.WebView2/
 
+# ---- Windows shell extensions (user-installed; third-party code, never commit) ----
+windows/extensions/*
+!windows/extensions/README.md
+
 # ---- Local scratch ----
 .tmp_*
 .git-msg.txt

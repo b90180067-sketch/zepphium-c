@@ -11,6 +11,7 @@
 #include <windowsx.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <sddl.h>
 #include <cstdio>
 #include <cstdarg>
@@ -472,6 +473,79 @@ static void GiveViewFocus(ZephiumTab *tab) {
 }
 
 /* --------------------------------------------------------- COM tab handlers */
+/* ------------------------------------------------------- downloads + permissions */
+
+static unsigned g_download_seq = 0;
+
+static const wchar_t *PermissionKindName(COREWEBVIEW2_PERMISSION_KIND kind) {
+    switch (kind) {
+    case COREWEBVIEW2_PERMISSION_KIND_MICROPHONE: return L"microphone";
+    case COREWEBVIEW2_PERMISSION_KIND_CAMERA: return L"camera";
+    case COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION: return L"geolocation";
+    case COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS: return L"notifications";
+    case COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS: return L"sensors";
+    case COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ: return L"clipboard-read";
+    case COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS: return L"multiple-downloads";
+    case COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE: return L"file-read-write";
+    case COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY: return L"autoplay";
+    case COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS: return L"local-fonts";
+    case COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES: return L"midi-exclusive";
+    case COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT: return L"window-management";
+    case COREWEBVIEW2_PERMISSION_KIND_PERSISTENT_STORAGE: return L"persistent-storage";
+    default: return L"unknown";
+    }
+}
+
+/* The user's Downloads known folder, created when it does not exist yet. */
+static std::wstring DownloadsDirectory() {
+    std::wstring dir;
+#ifdef FOLDERID_Downloads
+    PWSTR known = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &known)) && known) {
+        dir.assign(known);
+        CoTaskMemFree(known);
+    }
+#endif
+    if (dir.empty()) {
+        wchar_t profile[MAX_PATH] = {0};
+        DWORD len = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) dir = std::wstring(profile) + L"\\Downloads";
+    }
+    if (!dir.empty()) CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+/* Keeps only the last path component of the server-provided name, replaces every
+ * separator and control character, drops leading dots and never returns "". */
+static std::wstring SanitizeDownloadName(const std::wstring &suggested) {
+    size_t slash = suggested.find_last_of(L"\\/");
+    std::wstring base = slash == std::wstring::npos ? suggested : suggested.substr(slash + 1);
+
+    std::wstring out;
+    out.reserve(base.size());
+    for (wchar_t c : base) {
+        if (c == L'\\' || c == L'/' || c == L':' || c < 0x20) out.push_back(L'_');
+        else out.push_back(c);
+    }
+
+    size_t first = out.find_first_not_of(L'.');
+    out = first == std::wstring::npos ? std::wstring() : out.substr(first);
+    if (out.empty()) out = L"download";
+    return out;
+}
+
+static std::wstring UniqueDownloadPath(const std::wstring &dir, const std::wstring &name) {
+    std::wstring path = dir + L"\\" + name;
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return path;
+    for (unsigned n = 1; n < 1000; ++n) {
+        wchar_t suffix[32];
+        swprintf(suffix, 32, L" (%u)", n);
+        std::wstring candidate = dir + L"\\" + name + suffix;
+        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) return candidate;
+    }
+    return path;
+}
+
 class ZephiumControllerHandler
     : public ZephiumCom<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, &kIID_CtrlCompleted> {
 public:
@@ -490,6 +564,58 @@ public:
 
 private:
     int m_tab_id;
+};
+
+class ZephiumNewWindowHandler
+    : public ZephiumCom<ICoreWebView2NewWindowRequestedEventHandler,
+                        &IID_ICoreWebView2NewWindowRequestedEventHandler> {
+public:
+    explicit ZephiumNewWindowHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
+
+/* Default-deny permission handler: WebView2 asks before a page may use a device,
+ * the location, notifications, the clipboard or the filesystem. Only autoplay
+ * (media playback) is granted - the same line the GTK shell draws with EME. */
+class ZephiumPermissionHandler
+    : public ZephiumCom<ICoreWebView2PermissionRequestedEventHandler,
+                        &IID_ICoreWebView2PermissionRequestedEventHandler> {
+public:
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *, ICoreWebView2PermissionRequestedEventArgs *args) override;
+};
+
+class ZephiumDownloadHandler
+    : public ZephiumCom<ICoreWebView2DownloadStartingEventHandler,
+                        &IID_ICoreWebView2DownloadStartingEventHandler> {
+public:
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *, ICoreWebView2DownloadStartingEventArgs *args) override;
+};
+
+class ZephiumDownloadProgressHandler
+    : public ZephiumCom<ICoreWebView2BytesReceivedChangedEventHandler,
+                        &IID_ICoreWebView2BytesReceivedChangedEventHandler> {
+public:
+    explicit ZephiumDownloadProgressHandler(std::string id) : m_id(std::move(id)) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2DownloadOperation *sender, IUnknown *args) override;
+
+private:
+    std::string m_id;
+    ULONGLONG m_last_update_ms = 0;
+};
+
+class ZephiumDownloadStateHandler
+    : public ZephiumCom<ICoreWebView2StateChangedEventHandler,
+                        &IID_ICoreWebView2StateChangedEventHandler> {
+public:
+    explicit ZephiumDownloadStateHandler(std::string id) : m_id(std::move(id)) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2DownloadOperation *sender, IUnknown *args) override;
+
+private:
+    std::string m_id;
 };
 
 /* ------------------------------------------------------------- tab control */
@@ -739,6 +865,19 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
 
     EventRegistrationToken token = {};
     controller->add_AcceleratorKeyPressed(new ZephiumAccelHandler(tab->id), &token);
+    EventRegistrationToken permission_token = {};
+    tab->view->add_PermissionRequested(new ZephiumPermissionHandler(), &permission_token);
+
+    /* Downloads live on ICoreWebView2_4 (runtime 1.0.864+); without it WebView2
+     * falls back to its own save dialog and nothing is recorded. */
+    ICoreWebView2_4 *view4 = nullptr;
+    if (SUCCEEDED(tab->view->QueryInterface(IID_ICoreWebView2_4, (void **)&view4)) && view4) {
+        EventRegistrationToken download_token = {};
+        view4->add_DownloadStarting(new ZephiumDownloadHandler(), &download_token);
+        view4->Release();
+    } else {
+        Log(L"ICoreWebView2_4 unavailable; downloads are not intercepted");
+    }
 
     const int index = (int)(std::find(g_tabs.begin(), g_tabs.end(), tab) - g_tabs.begin());
     zephium_tab_t *core_tab = g_core ? zephium_browser_get_tab(g_core, (size_t)index) : nullptr;
@@ -803,6 +942,165 @@ HRESULT STDMETHODCALLTYPE ZephiumAccelHandler::Invoke(ICoreWebView2Controller *,
         args->put_Handled(TRUE);
     }
     (void)m_tab_id;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumNewWindowHandler::Invoke(ICoreWebView2 *,
+                                                          ICoreWebView2NewWindowRequestedEventArgs *args) {
+    if (!args) return S_OK;
+
+    LPWSTR uri = nullptr;
+    if (FAILED(args->get_Uri(&uri)) || !uri) {
+        args->put_Handled(TRUE);
+        return S_OK;
+    }
+    std::wstring target(uri);
+    CoTaskMemFree(uri);
+
+    /* Always handled: WebView2 would otherwise open a second top-level window with
+     * its own chrome. The request becomes a tab of this shell instead. */
+    args->put_Handled(TRUE);
+
+    std::string target8 = WideToUtf8(target);
+    if (!zephium_nav_is_allowed(target8.c_str(), target8.size())) {
+        Log(L"popup blocked: %ls", RedactUrl(target).c_str());
+        return S_OK;
+    }
+
+    Log(L"popup opened in a new tab: %ls", RedactUrl(target).c_str());
+    if (AddTab(target, true, false) < 0) Log(L"popup: could not create a tab");
+    (void)m_tab_id;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumPermissionHandler::Invoke(ICoreWebView2 *,
+                                                           ICoreWebView2PermissionRequestedEventArgs *args) {
+    if (!args) return S_OK;
+
+    COREWEBVIEW2_PERMISSION_KIND kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+    args->get_PermissionKind(&kind);
+
+    std::wstring origin;
+    LPWSTR uri = nullptr;
+    if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+        origin.assign(uri);
+        CoTaskMemFree(uri);
+    }
+
+    if (kind == COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY) {
+        args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+        Log(L"permission: autoplay allowed (%ls)", RedactUrl(origin).c_str());
+    } else {
+        args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
+        Log(L"permission: %ls denied (%ls)", PermissionKindName(kind), RedactUrl(origin).c_str());
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumDownloadHandler::Invoke(ICoreWebView2 *,
+                                                         ICoreWebView2DownloadStartingEventArgs *args) {
+    if (!args) return S_OK;
+
+    ICoreWebView2DownloadOperation *op = nullptr;
+    if (FAILED(args->get_DownloadOperation(&op)) || !op) return S_OK;
+
+    std::wstring url;
+    LPWSTR uri = nullptr;
+    if (SUCCEEDED(op->get_Uri(&uri)) && uri) {
+        url.assign(uri);
+        CoTaskMemFree(uri);
+    }
+
+    std::wstring suggested;
+    LPWSTR result_path = nullptr;
+    if (SUCCEEDED(args->get_ResultFilePath(&result_path)) && result_path) {
+        suggested.assign(result_path);
+        CoTaskMemFree(result_path);
+    }
+
+    std::wstring name = SanitizeDownloadName(suggested);
+    std::wstring dir = DownloadsDirectory();
+    if (dir.empty()) {
+        Log(L"download cancelled: no Downloads directory");
+        args->put_Cancel(TRUE);
+        op->Release();
+        return S_OK;
+    }
+
+    std::wstring path = UniqueDownloadPath(dir, name);
+    HRESULT put = args->put_ResultFilePath(path.c_str());
+    if (FAILED(put)) {
+        Log(L"download cancelled: destination rejected (0x%08lx)", (unsigned long)put);
+        args->put_Cancel(TRUE);
+        op->Release();
+        return S_OK;
+    }
+    args->put_Handled(TRUE);   /* no "Save as" dialog */
+
+    INT64 total = 0;
+    op->get_TotalBytesToReceive(&total);
+
+    char id[32] = {0};
+    snprintf(id, sizeof(id), "dl-%u", ++g_download_seq);
+
+    if (g_core && g_core->store) {
+        std::string url8 = WideToUtf8(url);
+        std::string path8 = WideToUtf8(path);
+        if (!zephium_store_record_download(g_core->store, id, url8.c_str(), path8.c_str(),
+                                           (int64_t)total)) {
+            Log(L"download: could not record it in the store");
+        }
+    }
+
+    EventRegistrationToken token = {};
+    op->add_BytesReceivedChanged(new ZephiumDownloadProgressHandler(id), &token);
+    op->add_StateChanged(new ZephiumDownloadStateHandler(id), &token);
+
+    Log(L"download started: %ls -> %ls", RedactUrl(url).c_str(), name.c_str());
+    op->Release();
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumDownloadProgressHandler::Invoke(ICoreWebView2DownloadOperation *sender,
+                                                                 IUnknown *) {
+    if (!sender || !g_core || !g_core->store) return S_OK;
+
+    /* Raised per chunk; the store commits synchronously, so write at most twice a
+     * second. */
+    ULONGLONG now = GetTickCount64();
+    if (m_last_update_ms != 0 && now - m_last_update_ms < 500) return S_OK;
+    m_last_update_ms = now;
+
+    INT64 received = 0, total = 0;
+    sender->get_BytesReceived(&received);
+    sender->get_TotalBytesToReceive(&total);
+    zephium_store_update_download_progress(g_core->store, m_id.c_str(), (int64_t)received,
+                                           (int64_t)total);
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumDownloadStateHandler::Invoke(ICoreWebView2DownloadOperation *sender,
+                                                              IUnknown *) {
+    if (!sender || !g_core || !g_core->store) return S_OK;
+
+    INT64 received = 0, total = 0;
+    sender->get_BytesReceived(&received);
+    sender->get_TotalBytesToReceive(&total);
+
+    COREWEBVIEW2_DOWNLOAD_STATE state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+    sender->get_State(&state);
+
+    if (state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED) {
+        zephium_store_update_download_progress(g_core->store, m_id.c_str(), (int64_t)received,
+                                               total > 0 ? (int64_t)total : (int64_t)received);
+        zephium_store_update_download(g_core->store, m_id.c_str(), (int64_t)received,
+                                      ZEPHIUM_DOWNLOAD_COMPLETED);
+        Log(L"download finished: %lld bytes", (long long)received);
+    } else if (state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED) {
+        zephium_store_update_download(g_core->store, m_id.c_str(), (int64_t)received,
+                                      ZEPHIUM_DOWNLOAD_FAILED);
+        Log(L"download interrupted");
+    }
     return S_OK;
 }
 

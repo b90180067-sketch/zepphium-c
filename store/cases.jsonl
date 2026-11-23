@@ -7,3 +7,46 @@
 {"fn":"history_visits","args":["https://github.com","GitHub",3],"result":3,"error":null}
 {"fn":"history_clear","args":[],"result":0,"error":null}
 {"fn":"download_lifecycle","args":["01ARZ3NDEKTSV4RRFFQ69G5FAW","https://example.com/file.zip","/tmp/file.zip",1024,1],"result":true,"error":null}
+{"fn":"fresh_store","args":[],"result":true,"error":null}
+{"fn":"list_history","args":[0,0],"result":"","error":null}
+{"fn":"search_history","args":["example",0],"result":"","error":null}
+{"fn":"list_bookmarks","args":[0,0],"result":"","error":null}
+{"fn":"list_downloads","args":[0,0],"result":"","error":null}
+{"fn":"history_add","args":["https://example.com/one","One",1000],"result":true,"error":null}
+{"fn":"history_add","args":["https://example.com/two","Two",2000],"result":true,"error":null}
+{"fn":"history_add","args":["https://example.com/three","Three",3000],"result":true,"error":null}
+{"fn":"history_add","args":["https://shop.example.org/100%-off?x=1&y=2","Sale 100%_off",4000],"result":true,"error":null}
+{"fn":"history_add","args":["https://sql.example.org/quote'","O'Brien \"quoted\" \\ path",5000],"result":true,"error":null}
+{"fn":"history_add","args":["https://example.com/tìm-kiếm","Tìm kiếm 日本語",6000],"result":true,"error":null}
+{"fn":"list_history","args":[2,0],"result":"https://example.com/tìm-kiếm\tTìm kiếm 日本語\t6000\nhttps://sql.example.org/quote'\tO'Brien \"quoted\" \\ path\t5000","error":null}
+{"fn":"list_history","args":[2,2],"result":"https://shop.example.org/100%-off?x=1&y=2\tSale 100%_off\t4000\nhttps://example.com/three\tThree\t3000","error":null}
+{"fn":"list_history","args":[3,4],"result":"https://example.com/two\tTwo\t2000\nhttps://example.com/one\tOne\t1000","error":null}
+{"fn":"list_history","args":[0,0],"result":"https://example.com/tìm-kiếm\tTìm kiếm 日本語\t6000\nhttps://sql.example.org/quote'\tO'Brien \"quoted\" \\ path\t5000\nhttps://shop.example.org/100%-off?x=1&y=2\tSale 100%_off\t4000\nhttps://example.com/three\tThree\t3000\nhttps://example.com/two\tTwo\t2000\nhttps://example.com/one\tOne\t1000","error":null}
+{"fn":"list_history","args":[10,99],"result":"","error":null}
+{"fn":"search_history","args":["kiếm",0],"result":"https://example.com/tìm-kiếm\tTìm kiếm 日本語\t6000","error":null}
+{"fn":"search_history","args":["example",0],"result":"https://example.com/tìm-kiếm\tTìm kiếm 日本語\t6000\nhttps://sql.example.org/quote'\tO'Brien \"quoted\" \\ path\t5000\nhttps://shop.example.org/100%-off?x=1&y=2\tSale 100%_off\t4000\nhttps://example.com/three\tThree\t3000\nhttps://example.com/two\tTwo\t2000\nhttps://example.com/one\tOne\t1000","error":null}
+{"fn":"search_history","args":["example",2],"result":"https://example.com/tìm-kiếm\tTìm kiếm 日本語\t6000\nhttps://sql.example.org/quote'\tO'Brien \"quoted\" \\ path\t5000","error":null}
+{"fn":"search_history","args":["100%",0],"result":"https://shop.example.org/100%-off?x=1&y=2\tSale 100%_off\t4000","error":null}
+{"fn":"search_history","args":["%",0],"result":"https://shop.example.org/100%-off?x=1&y=2\tSale 100%_off\t4000","error":null}
+{"fn":"search_history","args":["_",0],"result":"https://shop.example.org/100%-off?x=1&y=2\tSale 100%_off\t4000","error":null}
+{"fn":"search_history","args":["\\",0],"result":"https://sql.example.org/quote'\tO'Brien \"quoted\" \\ path\t5000","error":null}
+{"fn":"search_history","args":["O'Brien",0],"result":"https://sql.example.org/quote'\tO'Brien \"quoted\" \\ path\t5000","error":null}
+{"fn":"search_history","args":["'; DROP TABLE history; --",0],"result":"","error":null}
+{"fn":"count_history","args":[],"result":6,"error":null}
+{"fn":"history_clear","args":[],"result":0,"error":null}
+{"fn":"list_history","args":[0,0],"result":"","error":null}
+{"fn":"bookmark_add","args":["b1","https://a.example/","Alpha"],"result":true,"error":null}
+{"fn":"bookmark_add","args":["b2","https://b.example/?q=1&r=2","Beta & \"quotes\""],"result":true,"error":null}
+{"fn":"bookmark_add","args":["b3","https://c.example/100%","Gamma_%"],"result":true,"error":null}
+{"fn":"bookmark_add","args":["b4","https://d.example/x","Robert'); DROP TABLE bookmarks;--"],"result":true,"error":null}
+{"fn":"list_bookmarks","args":[2,0],"result":"b4\thttps://d.example/x\tRobert'); DROP TABLE bookmarks;--\nb3\thttps://c.example/100%\tGamma_%","error":null}
+{"fn":"list_bookmarks","args":[2,2],"result":"b2\thttps://b.example/?q=1&r=2\tBeta & \"quotes\"\nb1\thttps://a.example/\tAlpha","error":null}
+{"fn":"list_bookmarks","args":[0,0],"result":"b4\thttps://d.example/x\tRobert'); DROP TABLE bookmarks;--\nb3\thttps://c.example/100%\tGamma_%\nb2\thttps://b.example/?q=1&r=2\tBeta & \"quotes\"\nb1\thttps://a.example/\tAlpha","error":null}
+{"fn":"list_bookmarks","args":[5,5],"result":"","error":null}
+{"fn":"download_add","args":["d1","https://files.example/a.zip","/tmp/a.zip",1000],"result":true,"error":null}
+{"fn":"download_add","args":["d2","https://files.example/b.zip","/tmp/b.zip",2000],"result":true,"error":null}
+{"fn":"list_downloads","args":[0,0],"result":"d2\thttps://files.example/b.zip\t0\t0\t2000\nd1\thttps://files.example/a.zip\t0\t0\t1000","error":null}
+{"fn":"download_progress","args":["d1",500,1000],"result":true,"error":null}
+{"fn":"download_progress","args":["missing",1,1],"result":false,"error":null}
+{"fn":"list_downloads","args":[1,0],"result":"d2\thttps://files.example/b.zip\t0\t0\t2000","error":null}
+{"fn":"list_downloads","args":[0,1],"result":"d1\thttps://files.example/a.zip\t0\t500\t1000","error":null}

@@ -21,3 +21,6 @@
 {"fn":"split_separator_end","args":["plain-text"],"result":null,"error":null}
 {"fn":"split_separator_end","args":["/tracker\\([^A-Za-z0-9_.%-].*)?$"],"result":null,"error":null}
 {"fn":"split_separator_end","args":["/safe/path/([^A-Za-z0-9_.%-].*)?$"],"result":["/safe/path/$","/safe/path/[^A-Za-z0-9_.%-]"],"error":null}
+{"fn":"rules_to_webkit_json","args":["^https?://([^/]+\\.)?doubleclick\\.net/"],"result":"[{\"trigger\":{\"url-filter\":\"^https?://([^/]+\\\\.)?doubleclick\\\\.net/\"},\"action\":{\"type\":\"block\"}}]","error":null}
+{"fn":"rules_to_webkit_json","args":["^https?://example\\.com/a\"b/"],"result":"[{\"trigger\":{\"url-filter\":\"^https?://example\\\\.com/a\\\"b/\"},\"action\":{\"type\":\"block\"}}]","error":null}
+{"fn":"rules_to_webkit_json","args":[".*"],"result":"[{\"trigger\":{\"url-filter\":\".*\"},\"action\":{\"type\":\"block\"}}]","error":null}

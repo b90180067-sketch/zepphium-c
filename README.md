@@ -100,6 +100,19 @@ Các cờ hữu ích:
 | `--disable-gpu` | chỉ dùng GL phần mềm (llvmpipe) |
 | `--screenshot <file> --screenshot-delay N` | chụp ảnh trang đang render rồi thoát |
 | `--headless` | REPL/CLI khi không có màn hình |
+| `--no-adblock` | tắt bộ lọc quảng cáo cho phiên chạy này |
+
+**Ad blocking**: bộ lọc quảng cáo (doubleclick, google-analytics, facebook/tr) **bật mặc
+định**. Rule được sinh bởi module C17 `blocker`, biên dịch bất đồng bộ bằng
+`WebKitUserContentFilterStore` rồi gắn vào user-content-manager của **mọi tab**; log ghi
+`[ADBLOCK] Content filter active.`. Nếu WebKit không biên dịch được filter, browser chỉ ghi
+`[WARN] [ADBLOCK_FAILED] ...` và tiếp tục duyệt web không có filter. Tắt bằng cờ hoặc biến
+môi trường:
+
+```bash
+ZEPHIUM_ADBLOCK=0 ./run_wsl.sh https://duckduckgo.com
+./run_wsl.sh --no-adblock https://duckduckgo.com
+```
 
 **Sandbox WebKit**: sandbox WebProcess (bubblewrap) **bật mặc định**, kể cả trên WSL.
 Chỉ tắt khi kernel WSL2 không cấp được unprivileged user namespace (WebKit không khởi
@@ -126,6 +139,7 @@ Binary không đồ họa: `./build/zephium --batch` (regression), `./build/zeph
 | WSL: video YouTube không phát | Không tắt compositing/DMABUF (bản này đã xử lý); xem mục *Sự cố đã biết* bên dưới |
 | WSL chậm, tụt FPS | Kiểm tra `ls /dev/dri`: không có `renderD128` thì đang render bằng CPU — xem mục **Hiệu năng** |
 | WSL: WebKit không khởi động, log có lỗi `bwrap` / sandbox | Kernel thiếu unprivileged user namespace: chạy `ZEPHIUM_NO_SANDBOX=1 ./run_wsl.sh <url>` (sandbox tắt, có cảnh báo `[SANDBOX]`) |
+| Adblock không chặn (log có `[ADBLOCK_FAILED]`) | Xem thông báo lỗi ngay sau đó; tắt hẳn bằng `ZEPHIUM_ADBLOCK=0` nếu filter làm chậm trang |
 
 ---
 

@@ -396,6 +396,92 @@ static void install_page_diagnostics(WebKitUserContentManager *ucm) {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Ad blocking
+ *
+ * The portable blocker module emits WebKit content-blocker JSON; WebKit needs it
+ * compiled into a binary filter, which it does asynchronously in the UI process.
+ * Tabs that already exist when the compilation finishes (the first one always
+ * does) receive the filter through adblock_apply_to_tabs(). Any failure - rules
+ * that do not compile, an unwritable store directory - only costs ad blocking:
+ * pages keep loading.
+ * ------------------------------------------------------------------------- */
+#define ZEPHIUM_ADBLOCK_STORE_IDENTIFIER "zephium-adblock"
+
+static WebKitUserContentFilterStore *g_adblock_store = NULL;
+
+static bool zephium_adblock_enabled(bool cli_disabled) {
+    if (cli_disabled) return false;
+    const char *value = getenv("ZEPHIUM_ADBLOCK");
+    return !(value && strcmp(value, "0") == 0);
+}
+
+/* Give the compiled filter to every tab that already exists. remove_all_filters()
+ * keeps exactly one copy, including in tabs that were created after the filter
+ * became available. */
+static void adblock_apply_to_tabs(WebKitUserContentFilter *filter) {
+    if (!filter || !g_app.notebook) return;
+    gint pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(g_app.notebook));
+    for (gint i = 0; i < pages; ++i) {
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(g_app.notebook), i);
+        if (!page || !WEBKIT_IS_WEB_VIEW(page)) continue;
+        WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(page));
+        if (!ucm) continue;
+        webkit_user_content_manager_remove_all_filters(ucm);
+        webkit_user_content_manager_add_filter(ucm, filter);
+    }
+}
+
+static void on_adblock_filter_ready(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)user_data;
+    GError *error = NULL;
+    WebKitUserContentFilter *filter =
+        webkit_user_content_filter_store_save_finish(WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+    if (!filter) {
+        /* An ad blocker is never worth an error page: browse without it. */
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Content filter did not compile (%s); continuing without ad blocking.",
+                    error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        return;
+    }
+
+    g_app.adblock_filter = filter;
+    adblock_apply_to_tabs(filter);
+    zephium_log("INFO", "ADBLOCK", "Content filter active.");
+}
+
+static void adblock_init(bool cli_disabled) {
+    if (!zephium_adblock_enabled(cli_disabled)) {
+        zephium_log("INFO", "ADBLOCK", "Disabled (ZEPHIUM_ADBLOCK=0 or --no-adblock).");
+        return;
+    }
+
+    char rules[4096];
+    size_t rules_len = zephium_browser_generate_adblock_rules(rules, sizeof(rules));
+    if (rules_len == 0 || rules_len >= sizeof(rules)) {
+        zephium_log("WARN", "ADBLOCK_FAILED", "Rule generation failed; continuing without ad blocking.");
+        return;
+    }
+
+    char *store_dir = g_build_filename(g_get_user_cache_dir(), "zephium", "content-filters", NULL);
+    if (g_mkdir_with_parents(store_dir, 0700) != 0) {
+        zephium_log("WARN", "ADBLOCK_FAILED",
+                    "Cannot create the filter store directory %s; continuing without ad blocking.",
+                    store_dir);
+        g_free(store_dir);
+        return;
+    }
+    g_adblock_store = webkit_user_content_filter_store_new(store_dir);
+    g_free(store_dir);
+
+    GBytes *source = g_bytes_new(rules, rules_len);
+    webkit_user_content_filter_store_save(g_adblock_store, ZEPHIUM_ADBLOCK_STORE_IDENTIFIER, source,
+                                          NULL, on_adblock_filter_ready, NULL);
+    g_bytes_unref(source);
+    zephium_log("INFO", "ADBLOCK", "Compiling %zu bytes of blocker rules...", rules_len);
+}
+
 static WebKitWebView *get_active_web_view(zephium_gtk_app_t *app) {
     gint page_idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->notebook));
     if (page_idx < 0) return NULL;
@@ -886,7 +972,8 @@ static gboolean take_screenshot(gpointer data) {
 }
 
 static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool disable_gpu,
-                           bool is_wsl, const char *screenshot_path, int screenshot_delay) {
+                           bool is_wsl, const char *screenshot_path, int screenshot_delay,
+                           bool no_adblock) {
     gtk_init(&argc, &argv);
 
     memset(&g_app, 0, sizeof(g_app));
@@ -915,6 +1002,10 @@ static int run_gtk_browser(int argc, char **argv, const char *initial_url, bool 
         webkit_web_context_set_sandbox_enabled(web_context, TRUE);
     }
     webkit_web_context_set_cache_model(web_context, WEBKIT_CACHE_MODEL_WEB_BROWSER);
+
+    /* Start compiling the blocker rules before the first page loads; the filter
+     * arrives asynchronously and is attached to the tab created further down. */
+    adblock_init(no_adblock);
 
     g_app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_default_size(GTK_WINDOW(g_app.window), 1280, 800);
@@ -997,6 +1088,7 @@ static void print_usage(const char *prog) {
     printf("  --wayland           Force GDK Wayland display backend\n");
     printf("  --screenshot <file> Save a PNG of the rendered page and exit\n");
     printf("  --screenshot-delay  Seconds to wait before the screenshot (default 8)\n");
+    printf("  --no-adblock        Disable the content filter (same as ZEPHIUM_ADBLOCK=0)\n");
 }
 
 static int run_cli_browser(const char *initial_url) {
@@ -1125,6 +1217,7 @@ int main(int argc, char **argv) {
     bool disable_gpu = false;
     bool force_x11 = false;
     bool force_wayland = false;
+    bool no_adblock = false;
     const char *screenshot_path = NULL;
     int screenshot_delay = 8;
 
@@ -1150,6 +1243,8 @@ int main(int argc, char **argv) {
             force_x11 = true;
         } else if (strcmp(argv[i], "--wayland") == 0) {
             force_wayland = true;
+        } else if (strcmp(argv[i], "--no-adblock") == 0) {
+            no_adblock = true;
         } else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             screenshot_path = argv[++i];
         } else if (strcmp(argv[i], "--screenshot-delay") == 0 && i + 1 < argc) {
@@ -1169,7 +1264,7 @@ int main(int argc, char **argv) {
 #if defined(__linux__) && defined(ZEPHIUM_ENABLE_WEBKITGTK)
     if (!headless && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))) {
         return run_gtk_browser(argc, argv, initial_url, disable_gpu, on_wsl,
-                               screenshot_path, screenshot_delay);
+                               screenshot_path, screenshot_delay, no_adblock);
     }
 #endif
 
@@ -1177,5 +1272,6 @@ int main(int argc, char **argv) {
     (void)on_wsl;
     (void)screenshot_path;
     (void)screenshot_delay;
+    (void)no_adblock;
     return run_cli_browser(initial_url);
 }

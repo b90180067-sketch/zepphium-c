@@ -4,6 +4,11 @@ WebKitGTK only exists on Linux, so the native Windows build embeds **WebView2**
 (the Edge/Chromium engine that ships with Windows) instead, and reuses the same
 portable C17 core (`zoom`, `navigation`, `store`, `browser_core`).
 
+![Dark chrome while browsing](../newtab/preview-browsing.png)
+
+Toàn bộ chrome dùng chung một bộ màu tối: title bar (DWM), tab strip, toolbar, ô địa
+chỉ và các nút điều hướng — kể cả khi tab đang mở một trang sáng.
+
 ```
 windows/
 ├── zephium_win.cpp       # Win32 window + toolbar + WebView2 host (C++17)
@@ -16,9 +21,12 @@ windows/
 ├── fetch_rust.ps1        # installs rustup + the GNU Rust toolchain (idempotent)
 ├── sdk/                  # WebView2 SDK (not committed, fetched by the script)
 ├── zephium_win.exe       # build output
+├── zephium_win_newtab.exe # prebuilt with the start page (release convenience)
+├── newtab/               # start page assets copied by "mingw32-make assets"
 └── WebView2Loader.dll    # build output (copied from the SDK)
 
 ../blocker/rust/          # adblock-rust C ABI shim (staticlib, see blocker/rust/README.md)
+../newtab/                # start page source: C17 -> wasm wallpaper, HTML/CSS/JS, fonts
 ```
 
 ## Yêu cầu
@@ -55,7 +63,9 @@ mingw32-make
 `mingw32-make` builds, in order: the portable C17 modules, the Rust static
 library `blocker/rust/target/release/libzephium_adblock.a` (cargo; a one-time
 ~1-2 min build, reused afterwards), the shell objects and finally
-`zephium_win.exe`. Kết quả: `zephium_win.exe` + `WebView2Loader.dll` trong `windows/`.
+`zephium_win.exe`. Kết quả: `zephium_win.exe` + `WebView2Loader.dll` trong `windows/`,
+và `windows/newtab/` (start page HTML/CSS/JS/wasm/font) được copy từ `../newtab` bởi
+target `assets` (chạy trong `all`; gọi riêng bằng `mingw32-make assets`).
 
 Self test của ad blocking (console, không cần cửa sổ/WebView2, tự tải danh sách
 thật nếu có mạng):
@@ -68,11 +78,13 @@ mingw32-make clean               # xoá build output (giữ blocker/rust/target)
 ## Chạy
 
 ```powershell
-.\zephium_win.exe                       # mở duckduckgo
+.\zephium_win.exe                       # mở tab mới (ASCII start page)
 .\zephium_win.exe https://grokipedia.com
 ```
 
-Phím tắt: `Enter` trong ô địa chỉ để điều hướng, `Esc` trả focus về trang.
+Nếu đang mở một bản Zephium cũ thì Windows khoá file exe: đóng cửa sổ đó rồi build
+lại, hoặc chạy bản build sẵn `zephium_win_newtab.exe` (cùng tính năng). Phím tắt:
+`Enter` trong ô địa chỉ để điều hướng, `Esc` trả focus về trang.
 
 ## Tính năng
 
@@ -83,6 +95,16 @@ Phím tắt: `Enter` trong ô địa chỉ để điều hướng, `Esc` trả f
   webview (giữ URL/tiêu đề/zoom), khi bấm lại sẽ được tạo lại và nạp lại URL cũ.
   Không bao giờ ngủ tab đang active và tab đang phát audio
   (`ICoreWebView2_8::get_IsDocumentPlayingAudio`).
+- **Start page full-bleed**: `Ctrl+T` hoặc khởi động không URL mở
+  `https://newtab.zephium/index.html` (WebView2 virtual host trỏ vào `windows/newtab`).
+  Hình nền ASCII sinh bởi core C17 → WebAssembly (20 KB), omnibox ở giữa màn hình,
+  3 cảnh (Vịnh trăng / Bình minh / Cực quang), shortcut, đồng hồ và dòng trạng thái
+  FPS. Khi trang này active, hàng toolbar Win32 được ẩn để nội dung full-bleed;
+  omnibox gửi `navigate|<input>` về shell để core `navigation` phân loại URL/search.
+- **Chrome tối đồng bộ**: title bar tối qua DWM, tab strip + toolbar tự vẽ, nút
+  back/forward/reload/zoom owner-draw, ô địa chỉ borderless nền tối, tab active có
+  gạch accent mint. Toolbar và tab strip giữ tông này cho mọi trang (kể cả trang sáng
+  và start page), không quay về giao diện Win32 sáng.
 - Toolbar: back / forward / reload, ô địa chỉ, zoom -/+ (zoom theo từng tab), tiêu đề
   cửa sổ theo trang.
 - Đồng bộ URL + trạng thái back/forward mỗi 400 ms (không cần COM event handler).
@@ -113,7 +135,7 @@ zephium_win.exe [URL] [--tab-sleep <phút>] [--tab-sleep-seconds <giây>] [--no-
 | `Ctrl+T` | Tab mới |
 | `Ctrl+W` | Đóng tab hiện tại |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Tab kế / tab trước |
-| `Ctrl+L` | Focus ô địa chỉ |
+| `Ctrl+L` | Focus ô địa chỉ (trên start page: focus omnibox của trang) |
 | `F5` | Tải lại |
 | `Ctrl++` / `Ctrl+-` | Zoom tab hiện tại |
 
@@ -195,14 +217,16 @@ keeps working.
 ```
 
 - `%LOCALAPPDATA%` is used because the exe directory may be read-only (Program
-- If `%LOCALAPPDATA%\Zephium\adblock` cannot be created (locked-down profile or a
-  process whose write access is restricted to its workspace), the shell falls back to
-  `<exe dir>\zephium_adblock` and logs both paths plus the Win32 error code; only when
-  neither is writable does ad blocking run without lists (an existing engine cache can
-  still be loaded). Failed list writes log the path and the Win32 error as well.
   Files) while the lists and the ~7 MB cache must be writable. `ZEPHIUM_ADBLOCK_DIR=<dir>`
   overrides the whole tree (the self test uses it so tests never touch the
   production directory).
+- If `%LOCALAPPDATA%\Zephium\adblock` exists but is not writable (locked-down profile,
+  a process whose write access is restricted to its workspace), the shell probes it with
+  a temporary file, falls back to `<exe dir>\zephium_adblock`, and logs both paths plus
+  the Win32 error code; only when neither is writable does ad blocking run without lists
+  (an existing engine cache can still be loaded). Failed list writes log the path and the
+  Win32 error as well, and a refresh that could not store anything backs off 30 minutes
+  instead of re-downloading on the next due-check.
 - `--no-adblock` or `ZEPHIUM_ADBLOCK=0` disables the feature exactly as before (same
   log line, no lists touched). `ZEPHIUM_ADBLOCK=0` is read from the environment,
   `--no-adblock` from the command line.
@@ -377,3 +401,15 @@ cùng lúc.
 - Link với Rust staticlib cần thêm `-lsynchronization` (futex của Rust std dùng
   `WaitOnAddress`/`WakeByAddress*` không nằm trong import lib kernel32 của MinGW) cùng
   `-lws2_32 -luserenv -lntdll`; xem `LIBS` trong `Makefile`.
+- Start page được phục vụ qua `ICoreWebView2_3::SetVirtualHostNameToFolderMapping`
+  (`https://newtab.zephium/` → `windows/newtab`), nên `fetch('ascii_core.wasm')` chạy
+  như HTTP bình thường và trang không cần `file://`. Cầu `navigate|` chỉ nhận message
+  từ trang có `Source` bắt đầu bằng `https://newtab.zephium/`; trang ngoài không thể
+  điều khiển shell qua bridge.
+- Chrome tối: `WM_DRAWITEM` vẽ nút, `WM_CTLCOLOREDIT/STATIC` trả brush tối, còn
+  `DwmSetWindowAttribute` (attr 20 cho Win11, 19 cho Win10 20H1+, 35/34 cho caption và
+  border) đổi màu title bar. Khi toolbar ẩn, `ContentRect()` bắt đầu ngay dưới tab strip
+  để start page full-bleed.
+- Request của start page cũng đi qua ad blocker (cùng `WebResourceRequested`); các
+  asset nội bộ này không khớp rule nào nên luôn được cho qua, và engine chưa sẵn sàng
+  thì mọi request fail-open như bình thường.

@@ -34,6 +34,8 @@ windows/*.png
 windows/WebView2*.zip
 windows/zephium_webview2_profile/
 windows/*.WebView2/
+# Start page assets are copied from ../newtab by "mingw32-make assets".
+windows/newtab/
 
 # ---- Native ad blocking (Windows) ----
 # Downloaded filter lists, the binary engine cache and the adblock log are

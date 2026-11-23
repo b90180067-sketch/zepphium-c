@@ -7,8 +7,9 @@ SHELL = cmd.exe
 
 # Zephium Windows shell (Win32 + WebView2), build with: mingw32-make -C windows
 #
-#   mingw32-make            build zephium_win.exe + WebView2Loader.dll
-#   mingw32-make run        build and open duckduckgo
+#   mingw32-make            build zephium_win.exe + WebView2Loader.dll + start page assets
+#   mingw32-make assets     copy newtab/ (start page HTML/CSS/JS/wasm/fonts) next to the exe
+#   mingw32-make run        build and open the start page
 #   mingw32-make adblock-test
 #                           build and run adblock_selftest.exe (console test for
 #                           the native ad blocker; also needs the Rust staticlib)
@@ -54,7 +55,7 @@ LIBS = $(SQLITE_LIBS) -lole32 -luser32 -lgdi32 -lshell32 -lbcrypt -ladvapi32 \
 
 CORE_OBJS = obj/zoom_port.o obj/geometry_port.o obj/ids_port.o obj/navigation_port.o obj/blocker_port.o obj/store_port.o obj/browser_core_port.o
 
-all: zephium_win.exe loader
+all: zephium_win.exe loader assets
 
 obj:
 	@if not exist obj mkdir obj
@@ -114,8 +115,22 @@ loader:
 	@if exist "$(SDK_X64)\WebView2Loader.dll" copy /Y "$(SDK_X64)\WebView2Loader.dll" "WebView2Loader.dll" >NUL
 	@if not exist "WebView2Loader.dll" echo [warn] WebView2Loader.dll not copied - run fetch_sdk.ps1
 
+# The WebView2 virtual host serves the start page from newtab/ next to the exe, so
+# the shell maps https://newtab.zephium/ to windows\newtab.  Copied from ../newtab
+# (the sources live there, including the C17 -> wasm build of the wallpaper).
+assets:
+	@if not exist newtab mkdir newtab
+	@copy /Y "..\newtab\index.html" "newtab\index.html" >NUL
+	@copy /Y "..\newtab\newtab.css" "newtab\newtab.css" >NUL
+	@copy /Y "..\newtab\newtab.js" "newtab\newtab.js" >NUL
+	@copy /Y "..\newtab\ascii_core.wasm" "newtab\ascii_core.wasm" >NUL
+	@copy /Y "..\newtab\ascii_core_embed.js" "newtab\ascii_core_embed.js" >NUL
+	@if not exist "newtab\fonts" mkdir "newtab\fonts"
+	@copy /Y "..\newtab\fonts\paper-mono.woff2" "newtab\fonts\paper-mono.woff2" >NUL
+	@copy /Y "..\newtab\fonts\paper-mono-OFL.txt" "newtab\fonts\paper-mono-OFL.txt" >NUL
+
 run: all
-	.\zephium_win.exe https://duckduckgo.com
+	.\zephium_win.exe
 
 # The Rust target/ dir (several hundred MB of build artifacts) is deliberately
 # left alone; run "cargo clean --manifest-path ../blocker/rust/Cargo.toml" for it.
@@ -126,5 +141,6 @@ clean:
 	@if exist zephium_win.exe del /Q zephium_win.exe
 	@if exist adblock_selftest.exe del /Q adblock_selftest.exe
 	@if exist WebView2Loader.dll del /Q WebView2Loader.dll
+	@if exist newtab rmdir /S /Q newtab
 
-.PHONY: all obj loader run adblock-test clean
+.PHONY: all obj loader assets run adblock-test clean

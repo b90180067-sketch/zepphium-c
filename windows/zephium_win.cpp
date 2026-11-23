@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>
+#include <commctrl.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -74,8 +75,10 @@ static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER == ZEPHIUM_W2_CONTEXT
 
 /* ---------------------------------------------------------------- constants */
 #define ZEPHIUM_WINDOW_CLASS L"ZephiumWin32TabbedWindow"
-#define ZEPHIUM_TABBAR_HEIGHT 30
-#define ZEPHIUM_TOOLBAR_HEIGHT 36
+#define ZEPHIUM_TABBAR_HEIGHT 32
+#define ZEPHIUM_TOOLBAR_HEIGHT 42
+#define ZEPHIUM_NEWTAB_HOST L"newtab.zephium"
+#define ZEPHIUM_NEWTAB_URL L"https://newtab.zephium/index.html"
 #define ZEPHIUM_TIMER_ID 1
 #define ZEPHIUM_TIMER_MS 400
 
@@ -113,6 +116,9 @@ struct ZephiumTab {
     /* Ad-block state for this tab: the current document URL and the bounded set
      * of iframe URLs (WebView2 reports iframe navigations as DOCUMENT). */
     ZephiumAdblockFrameTracker adblock;
+    /* Set when the shell itself changes the tab URL (start page); the
+     * SourceChanged handler must not overwrite the pending navigation. */
+    ULONGLONG suppress_source_until = 0;
 };
 
 struct TabGeometry {
@@ -131,6 +137,22 @@ static HWND g_zoom_out = nullptr;
 static HWND g_zoom_in = nullptr;
 static HWND g_zoom_label = nullptr;
 
+static HFONT g_tab_font = nullptr;
+static HFONT g_url_font = nullptr;
+static HFONT g_icon_font = nullptr;
+static HBRUSH g_edit_brush = nullptr;
+static HBRUSH g_chrome_brush = nullptr;
+
+/* Dark chrome, always on. The start page, a dark site and a light site all sit
+ * under the same ink, so the tab strip never flips to a different theme. */
+static const COLORREF kChromeBg = RGB(10, 14, 19);
+static const COLORREF kToolbarBg = RGB(11, 16, 22);
+static const COLORREF kFieldBg = RGB(13, 20, 28);
+static const COLORREF kChromeLine = RGB(31, 43, 55);
+static const COLORREF kChromeInk = RGB(232, 238, 245);
+static const COLORREF kChromeMuted = RGB(139, 152, 166);
+static const COLORREF kChromeAccent = RGB(124, 232, 196);
+
 static ICoreWebView2Environment *g_env = nullptr;
 static zephium_browser_context_t *g_core = nullptr;
 
@@ -146,6 +168,9 @@ static bool g_adblock_enabled = true;      /* --no-adblock / ZEPHIUM_ADBLOCK=0 *
 static std::wstring g_initial_url;
 static std::wstring g_exe_dir;
 static std::wstring g_log_path;
+static std::wstring g_newtab_dir;          /* folder mapped to newtab.zephium */
+static std::wstring g_newtab_url;
+static bool g_newtab_mode = false;         /* the page is the full-bleed start page */
 
 /* -------------------------------------------------------------------- utils */
 static void Log(const wchar_t *fmt, ...) {
@@ -221,11 +246,55 @@ static std::wstring ExeDirectory() {
     return pos == std::wstring::npos ? std::wstring() : p.substr(0, pos);
 }
 
+static bool FileExistsW(const std::wstring &path) {
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static std::wstring FullPathW(const std::wstring &path) {
+    wchar_t buffer[MAX_PATH] = {0};
+    DWORD n = GetFullPathNameW(path.c_str(), MAX_PATH, buffer, nullptr);
+    return (n > 0 && n < MAX_PATH) ? std::wstring(buffer, n) : path;
+}
+
+static bool IsNewTabUrl(const std::wstring &url) {
+    if (g_newtab_url.empty()) return false;
+    if (url == g_newtab_url) return true;
+    return url.rfind(g_newtab_url + L"?", 0) == 0 ||
+           url.rfind(g_newtab_url + L"#", 0) == 0;
+}
+
+static std::wstring NewTabUrl() {
+    return g_newtab_url.empty() ? std::wstring(L"about:blank") : g_newtab_url;
+}
+
+/* Keep the caption in the same ink as the start page. dwmapi is loaded on
+ * demand so the shell still runs on systems without it. */
+static void SetDarkTitleBar() {
+    if (!g_hwnd) return;
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    if (!dwm) return;
+    typedef HRESULT(WINAPI *DwmSetAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
+    FARPROC proc = GetProcAddress(dwm, "DwmSetWindowAttribute");
+    DwmSetAttributeFn set_attribute = nullptr;
+    memcpy(&set_attribute, &proc, sizeof(set_attribute));
+    if (set_attribute) {
+        BOOL enabled = TRUE;
+        set_attribute(g_hwnd, 20, &enabled, sizeof(enabled)); /* Win11 */
+        set_attribute(g_hwnd, 19, &enabled, sizeof(enabled)); /* Win10 20H1+ */
+        COLORREF caption = kChromeBg;
+        set_attribute(g_hwnd, 35, &caption, sizeof(caption)); /* caption colour */
+        COLORREF border = kChromeBg;
+        set_attribute(g_hwnd, 34, &border, sizeof(border));   /* border colour */
+    }
+    FreeLibrary(dwm);
+}
+
 static RECT ContentRect() {
     RECT rc = {0, 0, 0, 0};
     if (!g_hwnd) return rc;
     GetClientRect(g_hwnd, &rc);
-    rc.top = ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT;
+    rc.top = ZEPHIUM_TABBAR_HEIGHT + (g_newtab_mode ? 0 : ZEPHIUM_TOOLBAR_HEIGHT);
     if (rc.bottom < rc.top) rc.bottom = rc.top;
     return rc;
 }
@@ -243,7 +312,11 @@ static const GUID kIID_AccelHandler = {0xb29c7e28, 0xfa79, 0x41a8,
                                        {0x8e, 0x44, 0x65, 0x81, 0x1c, 0x76, 0xdc, 0xb2}};
 static const GUID kIID_WebView2_8 = {0xe9632730, 0x6e1e, 0x43ab,
                                      {0xb7, 0xb8, 0x7b, 0x2c, 0x9e, 0x62, 0xe0, 0x94}};
-
+/* Start page virtual host (ICoreWebView2_3) and the page -> shell bridge. */
+static const GUID kIID_WebView2_3 = {0xA0D6DF20, 0x3B92, 0x416D,
+                                     {0xAA, 0x0C, 0x43, 0x7A, 0x9C, 0x72, 0x78, 0x57}};
+static const GUID kIID_WebMessage = {0x57213f19, 0x00e6, 0x49fa,
+                                     {0x8e, 0x07, 0x89, 0x8e, 0xa0, 0x1e, 0xcb, 0xd2}};
 
 static bool GuidEq(REFIID a, const GUID &b) {
     return memcmp(&a, &b, sizeof(GUID)) == 0;
@@ -399,12 +472,19 @@ static void DrawTabStrip(HDC dc, int client_width) {
     ComputeTabGeometry(client_width);
 
     RECT strip = {0, 0, client_width, ZEPHIUM_TABBAR_HEIGHT};
-    HBRUSH background = CreateSolidBrush(RGB(232, 232, 232));
+    HBRUSH background = CreateSolidBrush(kChromeBg);
     FillRect(dc, &strip, background);
     DeleteObject(background);
 
+    RECT bottom_line = {0, ZEPHIUM_TABBAR_HEIGHT - 1, client_width, ZEPHIUM_TABBAR_HEIGHT};
+    HBRUSH line_brush = CreateSolidBrush(kChromeLine);
+    FillRect(dc, &bottom_line, line_brush);
+    DeleteObject(line_brush);
+
+    HBRUSH border_brush = CreateSolidBrush(kChromeLine);
+
     SetBkMode(dc, TRANSPARENT);
-    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HFONT font = g_tab_font ? g_tab_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     HGDIOBJ old_font = SelectObject(dc, font);
 
     for (size_t i = 0; i < g_tabs.size(); ++i) {
@@ -412,38 +492,47 @@ static void DrawTabStrip(HDC dc, int client_width) {
         const bool active = ((int)i == g_active);
         const bool hovered = PtInRect(&r, g_mouse) != 0;
 
-        COLORREF face = active ? RGB(255, 255, 255) : (hovered ? RGB(242, 242, 242) : RGB(216, 216, 216));
+        COLORREF face = active ? RGB(24, 33, 44) : (hovered ? RGB(18, 25, 34) : RGB(13, 19, 26));
         HBRUSH brush = CreateSolidBrush(face);
         FillRect(dc, &r, brush);
         DeleteObject(brush);
-        FrameRect(dc, &r, (HBRUSH)GetStockObject(GRAY_BRUSH));
+        FrameRect(dc, &r, border_brush);
+
+        if (active) {
+            RECT accent = {r.left + 9, r.bottom - 2, r.right - 9, r.bottom};
+            HBRUSH accent_brush = CreateSolidBrush(kChromeAccent);
+            FillRect(dc, &accent, accent_brush);
+            DeleteObject(accent_brush);
+        }
 
         std::wstring label = g_tabs[i]->sleeping ? (L"\u23FE  " + g_tabs[i]->title) : g_tabs[i]->title;
+        if (IsNewTabUrl(g_tabs[i]->url)) label = L"Tab mới";
         if (label.empty()) label = L"New Tab";
-        RECT text = {r.left + 8, r.top, r.right - 22, r.bottom};
-        SetTextColor(dc, active ? RGB(0, 0, 0) : RGB(90, 90, 90));
+        RECT text = {r.left + 9, r.top, r.right - 23, r.bottom};
+        SetTextColor(dc, active ? kChromeInk : kChromeMuted);
         DrawTextW(dc, label.c_str(), -1, &text,
                   DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
         const RECT &close = g_geo.closes[i];
         const bool close_hovered = PtInRect(&close, g_mouse) != 0;
         if (close_hovered) {
-            HBRUSH hot = CreateSolidBrush(RGB(232, 120, 120));
+            HBRUSH hot = CreateSolidBrush(RGB(190, 86, 86));
             FillRect(dc, &close, hot);
             DeleteObject(hot);
         }
-        SetTextColor(dc, close_hovered ? RGB(255, 255, 255) : RGB(80, 80, 80));
+        SetTextColor(dc, close_hovered ? RGB(255, 255, 255) : kChromeMuted);
         DrawTextW(dc, L"\u00D7", -1, (RECT *)&close, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     }
 
     const bool plus_hovered = PtInRect(&g_geo.plus, g_mouse) != 0;
-    HBRUSH plus_brush = CreateSolidBrush(plus_hovered ? RGB(255, 255, 255) : RGB(222, 222, 222));
+    HBRUSH plus_brush = CreateSolidBrush(plus_hovered ? RGB(24, 33, 44) : RGB(13, 19, 26));
     FillRect(dc, &g_geo.plus, plus_brush);
     DeleteObject(plus_brush);
-    FrameRect(dc, &g_geo.plus, (HBRUSH)GetStockObject(GRAY_BRUSH));
-    SetTextColor(dc, RGB(40, 40, 40));
+    FrameRect(dc, &g_geo.plus, border_brush);
+    SetTextColor(dc, kChromeInk);
     DrawTextW(dc, L"+", -1, &g_geo.plus, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
 
+    DeleteObject(border_brush);
     SelectObject(dc, old_font);
 }
 
@@ -453,27 +542,27 @@ static void LayoutChildren() {
     RECT rc;
     GetClientRect(g_hwnd, &rc);
     const int width = rc.right - rc.left;
-    const int top = ZEPHIUM_TABBAR_HEIGHT + 4;
-    const int height = 26;
-    int x = 6;
+    const int top = ZEPHIUM_TABBAR_HEIGHT + 6;
+    const int height = 30;
+    int x = 8;
 
     HWND buttons[3] = {g_back, g_forward, g_reload};
-    const int btn_w[3] = {32, 32, 34};
     for (int i = 0; i < 3; ++i) {
-        if (buttons[i]) MoveWindow(buttons[i], x, top, btn_w[i], height, TRUE);
-        x += btn_w[i] + 4;
+        if (buttons[i]) MoveWindow(buttons[i], x, top, 30, height, TRUE);
+        x += 34;
     }
 
-    const int right_w = 32 + 4 + 56 + 4 + 32 + 6;
-    int url_w = width - x - right_w - 8;
+    const int zoom_in_x = width - 8 - 30;
+    const int label_x = zoom_in_x - 6 - 52;
+    const int zoom_out_x = label_x - 6 - 30;
+    const int url_x = x + 2;
+    int url_w = zoom_out_x - 8 - (url_x - 2);
     if (url_w < 120) url_w = 120;
-    if (g_url) MoveWindow(g_url, x, top, url_w, height, TRUE);
-    x += url_w + 6;
-    if (g_zoom_out) MoveWindow(g_zoom_out, x, top, 32, height, TRUE);
-    x += 36;
-    if (g_zoom_label) MoveWindow(g_zoom_label, x, top, 56, height, TRUE);
-    x += 60;
-    if (g_zoom_in) MoveWindow(g_zoom_in, x, top, 32, height, TRUE);
+
+    if (g_url) MoveWindow(g_url, url_x, top + 2, url_w - 4, height - 4, TRUE);
+    if (g_zoom_out) MoveWindow(g_zoom_out, zoom_out_x, top, 30, height, TRUE);
+    if (g_zoom_label) MoveWindow(g_zoom_label, label_x, top, 52, height, TRUE);
+    if (g_zoom_in) MoveWindow(g_zoom_in, zoom_in_x, top, 30, height, TRUE);
 
     RECT content = ContentRect();
     for (ZephiumTab *t : g_tabs) {
@@ -486,6 +575,26 @@ static void UpdateZoomLabel() {
     wchar_t buf[32];
     swprintf(buf, 32, L"%d%%", g_zoom_percent);
     SetWindowTextW(g_zoom_label, buf);
+}
+
+/* The start page is a full-bleed surface: the tab strip stays, the URL row
+ * hides, and the web view grows into the space. */
+static void ApplyNewTabMode(bool on) {
+    if (g_newtab_mode == on) return;
+    g_newtab_mode = on;
+
+    HWND controls[] = {g_back, g_forward, g_reload, g_url, g_zoom_out, g_zoom_label, g_zoom_in};
+    for (HWND control : controls) {
+        if (control) ShowWindow(control, on ? SW_HIDE : SW_SHOW);
+    }
+    LayoutChildren();
+    SetDarkTitleBar();
+    if (g_hwnd) {
+        RECT rc;
+        GetClientRect(g_hwnd, &rc);
+        InvalidateRect(g_hwnd, &rc, TRUE);
+    }
+    Log(L"chrome mode: %ls", on ? L"new tab" : L"browsing");
 }
 
 static void SyncActiveView() {
@@ -504,7 +613,13 @@ static void SyncActiveView() {
             if (GetFocus() != g_url) SetWindowTextW(g_url, src);
             std::wstring observed(src);
             CoTaskMemFree(src);
-            if (observed != tab->url) {
+            /* WebView2 reports about:blank before the first navigation starts.
+             * Do not let that clobber the URL the tab was created with, and do
+             * not chase the old Source while a deliberate navigation is in
+             * flight. */
+            const bool settling = GetTickCount64() < tab->suppress_source_until;
+            const bool placeholder = observed == L"about:blank" && tab->url != L"about:blank";
+            if (!settling && !placeholder && observed != tab->url) {
                 tab->url = observed;
                 if (core_tab && observed != Utf8ToWide(core_tab->current_url)) {
                     zephium_browser_navigate(g_core, WideToUtf8(observed).c_str());
@@ -538,6 +653,7 @@ static void SyncActiveView() {
         EnableWindow(g_back, FALSE);
         EnableWindow(g_forward, FALSE);
     }
+    ApplyNewTabMode(IsNewTabUrl(tab->url));
 }
 
 static bool TabPlayingAudio(ZephiumTab *tab) {
@@ -555,6 +671,26 @@ static void GiveViewFocus(ZephiumTab *tab) {
 }
 
 /* --------------------------------------------------------- COM tab handlers */
+class ZephiumControllerHandler
+    : public ZephiumCom<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, &kIID_CtrlCompleted> {
+public:
+    explicit ZephiumControllerHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2Controller *controller) override;
+
+private:
+    int m_tab_id;
+};
+
+class ZephiumAccelHandler
+    : public ZephiumCom<ICoreWebView2AcceleratorKeyPressedEventHandler, &kIID_AccelHandler> {
+public:
+    explicit ZephiumAccelHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
 /* ------------------------------------------------------- downloads + permissions */
 
 static unsigned g_download_seq = 0;
@@ -627,26 +763,6 @@ static std::wstring UniqueDownloadPath(const std::wstring &dir, const std::wstri
     }
     return path;
 }
-
-class ZephiumControllerHandler
-    : public ZephiumCom<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, &kIID_CtrlCompleted> {
-public:
-    explicit ZephiumControllerHandler(int tab_id) : m_tab_id(tab_id) {}
-    HRESULT STDMETHODCALLTYPE Invoke(HRESULT result, ICoreWebView2Controller *controller) override;
-
-private:
-    int m_tab_id;
-};
-
-class ZephiumAccelHandler
-    : public ZephiumCom<ICoreWebView2AcceleratorKeyPressedEventHandler, &kIID_AccelHandler> {
-public:
-    explicit ZephiumAccelHandler(int tab_id) : m_tab_id(tab_id) {}
-    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) override;
-
-private:
-    int m_tab_id;
-};
 
 class ZephiumNewWindowHandler
     : public ZephiumCom<ICoreWebView2NewWindowRequestedEventHandler,
@@ -1120,10 +1236,11 @@ static int AddTab(const std::wstring &raw_url, bool activate, bool reuse_initial
     ZephiumTab *tab = new ZephiumTab();
     tab->id = ++g_next_tab_id;
     tab->url = core_tab ? Utf8ToWide(core_tab->current_url) : raw_url;
-    tab->title = L"New Tab";
+    tab->title = L"Tab mới";
     tab->last_active = GetTickCount64();
 
     g_tabs.push_back(tab);
+    ApplyNewTabMode(IsNewTabUrl(tab->url));
     const int index = (int)g_tabs.size() - 1;
     Log(L"new tab %d id=%d url=%ls (core tabs=%zu)", index, tab->id, RedactUrl(tab->url).c_str(), g_core->tab_count);
 
@@ -1241,7 +1358,7 @@ static void CloseTab(int index) {
 
     if (g_tabs.empty()) {
         g_active = -1;
-        AddTab(L"about:blank", true, false);
+        AddTab(NewTabUrl(), true, false);
         return;
     }
     if (g_active < 0 || g_active >= (int)g_tabs.size()) g_active = std::min(index, (int)g_tabs.size() - 1);
@@ -1283,6 +1400,8 @@ static void NavigateToResolved(const std::wstring &raw) {
     zephium_tab_t *core_tab = zephium_browser_get_tab(g_core, (size_t)g_active);
     std::wstring resolved = core_tab ? Utf8ToWide(core_tab->current_url) : raw;
     tab->url = resolved;
+    tab->suppress_source_until = GetTickCount64() + 1500;
+    ApplyNewTabMode(IsNewTabUrl(tab->url));
     Log(L"navigate tab %d: %ls -> %ls", g_active, RedactUrl(raw).c_str(), RedactUrl(resolved).c_str());
 
     if (tab->sleeping) {
@@ -1299,6 +1418,57 @@ static void NavigateFromEdit() {
     GetWindowTextW(g_url, buf, 4096);
     NavigateToResolved(buf);
 }
+
+/* The start page asks the shell to resolve a typed address and navigate the
+ * tab, so URL classification / search fallback stay in the C core rather than
+ * being re-implemented in JavaScript. Messages from any other origin are
+ * ignored. */
+class ZephiumWebMessageHandler
+    : public ZephiumCom<ICoreWebView2WebMessageReceivedEventHandler, &kIID_WebMessage> {
+public:
+    explicit ZephiumWebMessageHandler(int tab_id) : m_tab_id(tab_id) {}
+
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *,
+                                     ICoreWebView2WebMessageReceivedEventArgs *args) override {
+        if (!args) return S_OK;
+
+        LPWSTR source = nullptr;
+        if (FAILED(args->get_Source(&source)) || !source) return S_OK;
+        std::wstring source_url(source);
+        CoTaskMemFree(source);
+        if (source_url.rfind(L"https://" ZEPHIUM_NEWTAB_HOST L"/", 0) != 0) {
+            Log(L"ignored web message from %ls", RedactUrl(source_url).c_str());
+            return S_OK;
+        }
+
+        LPWSTR raw = nullptr;
+        if (FAILED(args->TryGetWebMessageAsString(&raw)) || !raw) return S_OK;
+        std::wstring message(raw);
+        CoTaskMemFree(raw);
+
+        const std::wstring prefix = L"navigate|";
+        if (message.rfind(prefix, 0) != 0) return S_OK;
+        const std::wstring target = message.substr(prefix.size());
+        if (target.empty()) return S_OK;
+
+        int index = -1;
+        for (int i = 0; i < (int)g_tabs.size(); ++i) {
+            if (g_tabs[(size_t)i]->id == m_tab_id) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) return S_OK;
+        if (index != g_active) ActivateTab(index);
+
+        Log(L"newtab navigate: %ls", RedactUrl(target).c_str());
+        NavigateToResolved(target);
+        return S_OK;
+    }
+
+private:
+    int m_tab_id;
+};
 
 /* --------------------------------------------------------- COM callbacks */
 HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICoreWebView2Controller *controller) {
@@ -1336,6 +1506,13 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
 
     EventRegistrationToken token = {};
     controller->add_AcceleratorKeyPressed(new ZephiumAccelHandler(tab->id), &token);
+
+    EventRegistrationToken message_token = {};
+    tab->view->add_WebMessageReceived(new ZephiumWebMessageHandler(tab->id), &message_token);
+
+    EventRegistrationToken newwindow_token = {};
+    tab->view->add_NewWindowRequested(new ZephiumNewWindowHandler(tab->id), &newwindow_token);
+
     EventRegistrationToken permission_token = {};
     tab->view->add_PermissionRequested(new ZephiumPermissionHandler(), &permission_token);
 
@@ -1353,6 +1530,20 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
     /* Install the request filter before the first Navigate() so the very first
      * page (and its subresources) is already covered. */
     AttachAdblockToTab(tab);
+
+    if (!g_newtab_dir.empty()) {
+        ICoreWebView2_3 *view3 = nullptr;
+        if (SUCCEEDED(tab->view->QueryInterface(kIID_WebView2_3, (void **)&view3)) && view3) {
+            HRESULT mapped = view3->SetVirtualHostNameToFolderMapping(
+                ZEPHIUM_NEWTAB_HOST, g_newtab_dir.c_str(),
+                COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+            Log(L"map %ls -> %ls: 0x%08lx", ZEPHIUM_NEWTAB_HOST, g_newtab_dir.c_str(),
+                (unsigned long)mapped);
+            view3->Release();
+        } else {
+            Log(L"ICoreWebView2_3 unavailable; new tab host not mapped");
+        }
+    }
 
     const int index = (int)(std::find(g_tabs.begin(), g_tabs.end(), tab) - g_tabs.begin());
     zephium_tab_t *core_tab = g_core ? zephium_browser_get_tab(g_core, (size_t)index) : nullptr;
@@ -1392,7 +1583,7 @@ HRESULT STDMETHODCALLTYPE ZephiumAccelHandler::Invoke(ICoreWebView2Controller *,
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 
     if (ctrl && key == 'T') {
-        AddTab(L"about:blank", true, false);
+        AddTab(NewTabUrl(), true, false);
         args->put_Handled(TRUE);
     } else if (ctrl && key == 'W') {
         CloseTab(g_active);
@@ -1401,8 +1592,19 @@ HRESULT STDMETHODCALLTYPE ZephiumAccelHandler::Invoke(ICoreWebView2Controller *,
         NextTab(shift ? -1 : 1);
         args->put_Handled(TRUE);
     } else if (ctrl && key == 'L') {
-        SetFocus(g_url);
-        SendMessageW(g_url, EM_SETSEL, 0, -1);
+        if (g_newtab_mode) {
+            if (ZephiumTab *tab = ActiveTab()) {
+                if (tab->view) {
+                    tab->view->ExecuteScript(
+                        L"(function(){var i=document.getElementById('omnibox');"
+                        L"if(i){i.focus();i.select();}})();",
+                        nullptr);
+                }
+            }
+        } else {
+            SetFocus(g_url);
+            SendMessageW(g_url, EM_SETSEL, 0, -1);
+        }
         args->put_Handled(TRUE);
     } else if (ctrl && (key == VK_OEM_PLUS || key == VK_ADD)) {
         ZoomStep(true);
@@ -1579,6 +1781,95 @@ HRESULT STDMETHODCALLTYPE ZephiumDownloadStateHandler::Invoke(ICoreWebView2Downl
     return S_OK;
 }
 
+/* ------------------------------------------------------------ dark chrome */
+
+static void DrawChromeButton(const DRAWITEMSTRUCT *item) {
+    if (!item) return;
+    const wchar_t *glyph = nullptr;
+    switch (item->CtlID) {
+    case ID_BACK: glyph = L"\u2190"; break;
+    case ID_FORWARD: glyph = L"\u2192"; break;
+    case ID_RELOAD: glyph = L"\u21BB"; break;
+    case ID_ZOOM_OUT: glyph = L"\u2212"; break;
+    case ID_ZOOM_IN: glyph = L"+"; break;
+    default: return;
+    }
+
+    const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+    const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+    const bool focused = (item->itemState & ODS_FOCUS) != 0;
+
+    RECT r = item->rcItem;
+    r.right -= 1;
+    r.bottom -= 1;
+
+    COLORREF fill = pressed ? RGB(28, 39, 51) : RGB(15, 22, 30);
+    COLORREF border = focused ? kChromeAccent : (pressed ? RGB(52, 71, 87) : kChromeLine);
+    COLORREF ink = disabled ? RGB(92, 104, 116) : kChromeInk;
+
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ old_brush = SelectObject(item->hDC, brush);
+    HGDIOBJ old_pen = SelectObject(item->hDC, pen);
+
+    SetBkMode(item->hDC, TRANSPARENT);
+    RoundRect(item->hDC, r.left, r.top, r.right, r.bottom, 9, 9);
+
+    HFONT font = g_icon_font ? g_icon_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HGDIOBJ old_font = SelectObject(item->hDC, font);
+    SetTextColor(item->hDC, ink);
+    RECT text = item->rcItem;
+    DrawTextW(item->hDC, glyph, -1, &text,
+              DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+
+    SelectObject(item->hDC, old_font);
+    SelectObject(item->hDC, old_pen);
+    SelectObject(item->hDC, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+static void DrawToolbar(HDC dc, int width) {
+    RECT bar = {0, ZEPHIUM_TABBAR_HEIGHT, width, ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT};
+    HBRUSH background = CreateSolidBrush(kToolbarBg);
+    FillRect(dc, &bar, background);
+    DeleteObject(background);
+
+    RECT bottom = {0, ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT - 1, width,
+                   ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT};
+    HBRUSH line = CreateSolidBrush(kChromeLine);
+    FillRect(dc, &bottom, line);
+    DeleteObject(line);
+
+    if (g_url && IsWindowVisible(g_url)) {
+        RECT field;
+        GetWindowRect(g_url, &field);
+        MapWindowPoints(HWND_DESKTOP, g_hwnd, (POINT *)&field, 2);
+        InflateRect(&field, 2, 2);
+
+        const bool focused = GetFocus() == g_url;
+        HBRUSH fill = CreateSolidBrush(kFieldBg);
+        HPEN pen = CreatePen(PS_SOLID, 1, focused ? kChromeAccent : kChromeLine);
+        HGDIOBJ old_brush = SelectObject(dc, fill);
+        HGDIOBJ old_pen = SelectObject(dc, pen);
+        RoundRect(dc, field.left, field.top, field.right, field.bottom, 12, 12);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(pen);
+        DeleteObject(fill);
+    }
+
+    if (g_zoom_out && IsWindowVisible(g_zoom_out)) {
+        RECT r;
+        GetWindowRect(g_zoom_out, &r);
+        MapWindowPoints(HWND_DESKTOP, g_hwnd, (POINT *)&r, 2);
+        RECT divider = {r.left - 9, r.top + 7, r.left - 8, r.bottom - 7};
+        HBRUSH div_brush = CreateSolidBrush(kChromeLine);
+        FillRect(dc, &divider, div_brush);
+        DeleteObject(div_brush);
+    }
+}
+
 /* ------------------------------------------------------------- window proc */
 static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
@@ -1591,42 +1882,67 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     case WM_CREATE: {
         g_hwnd = hwnd;
         HINSTANCE inst = ((LPCREATESTRUCTW)lparam)->hInstance;
-        HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-        const int top = ZEPHIUM_TABBAR_HEIGHT + 4;
-        g_back = CreateWindowExW(0, L"BUTTON", L"\u2190", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 6, top, 32, 26, hwnd, (HMENU)ID_BACK, inst, nullptr);
-        g_forward = CreateWindowExW(0, L"BUTTON", L"\u2192", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                    42, top, 32, 26, hwnd, (HMENU)ID_FORWARD, inst, nullptr);
-        g_reload = CreateWindowExW(0, L"BUTTON", L"\u21BB", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                   78, top, 34, 26, hwnd, (HMENU)ID_RELOAD, inst, nullptr);
-        g_url = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                118, top, 600, 26, hwnd, (HMENU)ID_URL, inst, nullptr);
-        g_zoom_out = CreateWindowExW(0, L"BUTTON", L"-", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                     0, top, 32, 26, hwnd, (HMENU)ID_ZOOM_OUT, inst, nullptr);
+        g_tab_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        g_url_font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
+        g_icon_font = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
+        g_edit_brush = CreateSolidBrush(kFieldBg);
+        g_chrome_brush = CreateSolidBrush(kToolbarBg);
+
+        const int top = ZEPHIUM_TABBAR_HEIGHT + 6;
+        g_back = CreateWindowExW(0, L"BUTTON", L"\u2190",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                 8, top, 30, 30, hwnd, (HMENU)ID_BACK, inst, nullptr);
+        g_forward = CreateWindowExW(0, L"BUTTON", L"\u2192",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                    42, top, 30, 30, hwnd, (HMENU)ID_FORWARD, inst, nullptr);
+        g_reload = CreateWindowExW(0, L"BUTTON", L"\u21BB",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                   76, top, 30, 30, hwnd, (HMENU)ID_RELOAD, inst, nullptr);
+        g_url = CreateWindowExW(0, L"EDIT", L"",
+                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                112, top + 2, 600, 26, hwnd, (HMENU)ID_URL, inst, nullptr);
+        g_zoom_out = CreateWindowExW(0, L"BUTTON", L"\u2212",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                     0, top, 30, 30, hwnd, (HMENU)ID_ZOOM_OUT, inst, nullptr);
         g_zoom_label = CreateWindowExW(0, L"STATIC", L"100%",
                                        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
-                                       0, top, 56, 26, hwnd, (HMENU)ID_ZOOM_LABEL, inst, nullptr);
-        g_zoom_in = CreateWindowExW(0, L"BUTTON", L"+", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                    0, top, 32, 26, hwnd, (HMENU)ID_ZOOM_IN, inst, nullptr);
+                                       0, top, 52, 30, hwnd, (HMENU)ID_ZOOM_LABEL, inst, nullptr);
+        g_zoom_in = CreateWindowExW(0, L"BUTTON", L"+",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                    0, top, 30, 30, hwnd, (HMENU)ID_ZOOM_IN, inst, nullptr);
 
-        HWND controls[] = {g_back, g_forward, g_reload, g_url, g_zoom_out, g_zoom_label, g_zoom_in};
-        for (HWND control : controls) {
-            if (control) SendMessageW(control, WM_SETFONT, (WPARAM)font, TRUE);
-        }
+        SendMessageW(g_back, WM_SETFONT, (WPARAM)g_icon_font, TRUE);
+        SendMessageW(g_forward, WM_SETFONT, (WPARAM)g_icon_font, TRUE);
+        SendMessageW(g_reload, WM_SETFONT, (WPARAM)g_icon_font, TRUE);
+        SendMessageW(g_zoom_out, WM_SETFONT, (WPARAM)g_icon_font, TRUE);
+        SendMessageW(g_zoom_in, WM_SETFONT, (WPARAM)g_icon_font, TRUE);
+        SendMessageW(g_url, WM_SETFONT, (WPARAM)g_url_font, TRUE);
+        SendMessageW(g_zoom_label, WM_SETFONT, (WPARAM)g_tab_font, TRUE);
+        SendMessageW(g_url, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(10, 10));
+        SendMessageW(g_url, EM_SETLIMITTEXT, 4096, 0);
+
         EnableWindow(g_back, FALSE);
         EnableWindow(g_forward, FALSE);
         UpdateZoomLabel();
+        LayoutChildren();
+        SetDarkTitleBar();
         return 0;
     }
 
     case WM_SIZE:
         LayoutChildren();
-        UpdateTabStrip();
+        InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
 
     case WM_ERASEBKGND:
-        return 1;   /* the tab strip is painted (double buffered) in WM_PAINT */
+        return 1;   /* chrome is painted (double buffered) in WM_PAINT */
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -1634,11 +1950,14 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         RECT rc;
         GetClientRect(hwnd, &rc);
 
+        const int chrome_height = ZEPHIUM_TABBAR_HEIGHT +
+                                  (g_newtab_mode ? 0 : ZEPHIUM_TOOLBAR_HEIGHT);
         HDC memory = CreateCompatibleDC(dc);
-        HBITMAP bitmap = CreateCompatibleBitmap(dc, rc.right, ZEPHIUM_TABBAR_HEIGHT);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, rc.right, chrome_height);
         HGDIOBJ old = SelectObject(memory, bitmap);
         DrawTabStrip(memory, rc.right);
-        BitBlt(dc, 0, 0, rc.right, ZEPHIUM_TABBAR_HEIGHT, memory, 0, 0, SRCCOPY);
+        if (!g_newtab_mode) DrawToolbar(memory, rc.right);
+        BitBlt(dc, 0, 0, rc.right, chrome_height, memory, 0, 0, SRCCOPY);
         SelectObject(memory, old);
         DeleteObject(bitmap);
         DeleteDC(memory);
@@ -1647,6 +1966,30 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         return 0;
     }
 
+    case WM_DRAWITEM:
+        DrawChromeButton((const DRAWITEMSTRUCT *)lparam);
+        return TRUE;
+
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wparam;
+        if ((HWND)lparam == g_url) {
+            SetTextColor(dc, kChromeInk);
+            SetBkColor(dc, kFieldBg);
+            return (LRESULT)g_edit_brush;
+        }
+        break;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wparam;
+        SetTextColor(dc, kChromeMuted);
+        SetBkColor(dc, kToolbarBg);
+        return (LRESULT)g_chrome_brush;
+    }
+
+    case WM_CTLCOLORBTN:
+        return (LRESULT)g_chrome_brush;
+
     case WM_LBUTTONDOWN: {
         POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         if (pt.y < ZEPHIUM_TABBAR_HEIGHT) {
@@ -1654,7 +1997,7 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
             GetClientRect(hwnd, &client);
             ComputeTabGeometry(client.right);
             if (PtInRect(&g_geo.plus, pt)) {
-                AddTab(L"about:blank", true, false);
+                AddTab(NewTabUrl(), true, false);
                 return 0;
             }
             for (size_t i = 0; i < g_geo.tabs.size() && i < g_tabs.size(); ++i) {
@@ -1695,6 +2038,15 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         return 0;
 
     case WM_COMMAND: {
+        if (LOWORD(wparam) == ID_URL &&
+            (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS)) {
+            RECT bar = {0, ZEPHIUM_TABBAR_HEIGHT, 0, 0};
+            GetClientRect(hwnd, &bar);
+            bar.top = ZEPHIUM_TABBAR_HEIGHT;
+            bar.bottom = ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT;
+            InvalidateRect(hwnd, &bar, FALSE);
+            return 0;
+        }
         switch (LOWORD(wparam)) {
         case ID_BACK:
             if (ZephiumTab *tab = ActiveTab()) {
@@ -1718,7 +2070,7 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
             ZoomStep(false);
             return 0;
         case ID_NEW_TAB:
-            AddTab(L"about:blank", true, false);
+            AddTab(NewTabUrl(), true, false);
             return 0;
         case ID_CLOSE_TAB:
             CloseTab(g_active);
@@ -1774,9 +2126,22 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     const wchar_t *adblock_env = _wgetenv(L"ZEPHIUM_ADBLOCK");
     if (adblock_env && wcscmp(adblock_env, L"0") == 0) g_adblock_enabled = false;
 
+    std::wstring page_dir = g_exe_dir + L"\\newtab";
+    if (!FileExistsW(page_dir + L"\\index.html")) {
+        page_dir = g_exe_dir + L"\\..\\newtab";
+    }
+    if (FileExistsW(page_dir + L"\\index.html")) {
+        g_newtab_dir = FullPathW(page_dir);
+        g_newtab_url = ZEPHIUM_NEWTAB_URL;
+        Log(L"new tab page: %ls", g_newtab_dir.c_str());
+    } else {
+        Log(L"new tab page not found (expected newtab\\index.html next to the exe)");
+    }
+
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::wstring initial = L"https://duckduckgo.com";
+    std::wstring initial = g_newtab_url.empty() ? std::wstring(L"https://duckduckgo.com")
+                                                : g_newtab_url;
     for (int i = 1; argv && i < argc; ++i) {
         if (wcscmp(argv[i], L"--no-adblock") == 0) {
             g_adblock_enabled = false;
@@ -1819,7 +2184,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.lpfnWndProc = ZephiumWndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = ZEPHIUM_WINDOW_CLASS;
     if (!RegisterClassExW(&wc)) {
         Log(L"RegisterClassEx failed: %lu", GetLastError());
@@ -1834,6 +2199,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         return 1;
     }
     ShowWindow(hwnd, show);
+    SetDarkTitleBar();
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     UpdateWindow(hwnd);
 
     /* Native ad blocking lives on the UI thread (adblock-rust handles are thread

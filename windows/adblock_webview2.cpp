@@ -809,6 +809,10 @@ static void LogEngineSummary(const wchar_t *what) {
 static volatile LONG g_worker_running = 0;
 static HANDLE g_worker_thread = nullptr;
 static HANDLE g_stop_event = nullptr;
+/* Set when a refresh could not store every list (read-only directory, network
+ * error).  Without it the 60 s due-check would re-download megabytes over and
+ * over while the failure persists. */
+static volatile ULONGLONG g_refresh_retry_after_ms = 0;
 
 struct WorkerContext {
     HWND hwnd = nullptr;
@@ -879,13 +883,21 @@ static DWORD WINAPI RefreshThreadProc(void *parameter) {
         manifest.entries.push_back(entry);
     }
 
-    if (!WriteManifest(manifest)) {
+    const bool manifest_written = WriteManifest(manifest);
+    if (!manifest_written) {
         AdblockLog(L"adblock: could not write the list manifest");
     }
+    if (failed > 0 || !manifest_written) {
+        /* Back off for 30 minutes instead of retrying every due-check. */
+        g_refresh_retry_after_ms = GetTickCount64() + 30u * 60u * 1000u;
+    } else {
+        g_refresh_retry_after_ms = 0;
+    }
     AdblockLog(L"adblock: refresh finished in %llu ms: %zu/%zu lists downloaded (%llu KB), "
-               L"%zu changed, %zu failed",
+               L"%zu changed, %zu failed%s",
                GetTickCount64() - started, downloaded, EnabledListCount(),
-               downloaded_bytes / 1024u, changed, failed);
+               downloaded_bytes / 1024u, changed, failed,
+               (failed > 0 || !manifest_written) ? L" (retrying in 30 min)" : L"");
 
     /* Always tell the UI thread: it updates the "last refresh" clock even when
      * nothing changed, and only rebuilds the engine when list files did. */
@@ -926,6 +938,7 @@ static void StartRefreshWorker() {
 static void MaybeStartRefresh(bool force) {
     if (!g_enabled || !g_hwnd) return;
     if (InterlockedCompareExchange(&g_worker_running, 0, 0) != 0) return;
+    if (!force && GetTickCount64() < g_refresh_retry_after_ms) return;
     if (!force && g_last_refresh_unix != 0) {
         const uint64_t now = NowUnixSeconds();
         if (now >= g_last_refresh_unix && now - g_last_refresh_unix < 24u * 3600u) return;
@@ -997,6 +1010,27 @@ std::wstring zephium_adblock_root_dir(const std::wstring &exe_dir) {
     return JoinPath(exe_dir, L"zephium_adblock");
 }
 
+/* Creating a directory is not proof that files can be written inside it: a
+ * profile can exist yet be denied to the current token (sandboxed processes,
+ * mandatory integrity labels).  Probe with a temporary file that deletes itself
+ * when closed. */
+static bool DirectoryWritable(const std::wstring &path, DWORD *error_out) {
+    if (error_out) *error_out = ERROR_SUCCESS;
+    if (path.empty()) {
+        if (error_out) *error_out = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    const std::wstring probe = JoinPath(path, L".zephium-write-test");
+    HANDLE file = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (error_out) *error_out = GetLastError();
+        return false;
+    }
+    CloseHandle(file);
+    return true;
+}
+
 /* Picks a writable data directory: the configured/preferred one first, then one
  * next to the exe.  A locked-down profile (or a process running under a sandbox
  * that only allows writes inside its workspace) used to make ad blocking
@@ -1013,7 +1047,7 @@ static bool PrepareRootDir(const std::wstring &exe_dir, const std::wstring &pref
     }
     for (const std::wstring &candidate : candidates) {
         DWORD error = ERROR_SUCCESS;
-        if (EnsureDirectoryTreeEx(candidate, &error)) {
+        if (EnsureDirectoryTreeEx(candidate, &error) && DirectoryWritable(candidate, &error)) {
             *chosen = candidate;
             return true;
         }

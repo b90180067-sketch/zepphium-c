@@ -676,6 +676,213 @@ body.scene-changing #art { opacity: 0.18; }
 
 .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
 
+/* --- Frutiger Aero -------------------------------------------------------- */
+/* The shell flips data-theme from zephiumSetTheme().  Until the script runs the
+   body has no data-theme at all and the current ASCII scene stays visible. */
+
+body[data-theme="aero"] {
+    --ink: #0e3a66;
+    --muted: rgba(14, 58, 102, 0.78);
+    --faint: rgba(14, 58, 102, 0.58);
+    --line: rgba(255, 255, 255, 0.72);
+    --line-strong: rgba(255, 255, 255, 0.92);
+    --accent: #0e3a66;
+    --accent-rgb: 14, 58, 102;
+    color-scheme: light;
+    color: var(--ink);
+}
+
+body[data-theme="aero"]::before {
+    background:
+        radial-gradient(42% 24% at 18% 26%, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0) 70%),
+        radial-gradient(34% 20% at 64% 20%, rgba(255, 255, 255, 0.80), rgba(255, 255, 255, 0) 72%),
+        radial-gradient(46% 24% at 84% 40%, rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0) 74%),
+        radial-gradient(38% 18% at 36% 48%, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0) 76%),
+        radial-gradient(120% 26% at 50% 74%, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0) 72%),
+        linear-gradient(180deg, rgba(125, 206, 74, 0) 73%, #7dce4a 78%, #3d9a32 100%),
+        linear-gradient(180deg, #7ec8f8 0%, #9ed6fa 52%, #c5ecff 100%);
+}
+
+/* The dark hero vignette belongs to the ASCII wallpaper; aero has no need for
+   it and it would muddy the sky behind the omnibox. */
+body[data-theme="aero"] .hero::before {
+    display: none;
+}
+
+/* Everything that belongs to the ASCII wallpaper and its chrome. */
+body[data-theme="aero"] #art,
+body[data-theme="aero"] .atmosphere,
+body[data-theme="aero"] .grain,
+body[data-theme="aero"] .scenes,
+body[data-theme="aero"] .kicker,
+body[data-theme="aero"] #core-status,
+body[data-theme="aero"] #scene-meta,
+body[data-theme="aero"] #grid-meta,
+body[data-theme="aero"] .foot-left {
+    display: none;
+}
+
+/* Top bar: pale glass on a blue sky. */
+body[data-theme="aero"] .brand-square {
+    border-color: rgba(255, 255, 255, 0.92);
+    background: rgba(255, 255, 255, 0.55);
+    color: #0e3a66;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+body[data-theme="aero"] .foot {
+    justify-content: flex-end;
+    color: rgba(255, 255, 255, 0.92);
+}
+
+body[data-theme="aero"] .foot kbd {
+    color: #ffffff;
+    border-color: rgba(255, 255, 255, 0.62);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+/* Omnibox and suggestions become white translucent glass. */
+body[data-theme="aero"] .omnibox {
+    border-radius: 999px;
+    border-color: rgba(255, 255, 255, 0.92);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.58));
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.95) inset,
+        0 2px 10px rgba(14, 58, 102, 0.14),
+        0 24px 60px -26px rgba(14, 58, 102, 0.55);
+}
+
+body[data-theme="aero"] .omnibox:hover {
+    border-color: #ffffff;
+}
+
+body[data-theme="aero"] .omnibox:focus-within {
+    border-color: rgba(14, 58, 102, 0.52);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.74));
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.98) inset,
+        0 0 0 3px rgba(14, 58, 102, 0.10),
+        0 0 32px -8px rgba(255, 255, 255, 0.85),
+        0 24px 60px -26px rgba(14, 58, 102, 0.55);
+}
+
+body[data-theme="aero"] .omni-icon {
+    border-color: rgba(255, 255, 255, 0.95);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.68);
+    color: #0e3a66;
+}
+
+body[data-theme="aero"] #omnibox {
+    color: #0e3a66;
+    caret-color: #0e3a66;
+}
+
+body[data-theme="aero"] #omnibox::placeholder {
+    color: rgba(14, 58, 102, 0.55);
+}
+
+body[data-theme="aero"] .omni-enter {
+    color: rgba(14, 58, 102, 0.62);
+    border-color: rgba(14, 58, 102, 0.22);
+}
+
+body[data-theme="aero"] .omnibox:focus-within .omni-enter {
+    opacity: 1;
+    color: #0e3a66;
+    border-color: rgba(14, 58, 102, 0.42);
+}
+
+body[data-theme="aero"] .suggestions {
+    border-color: rgba(255, 255, 255, 0.95);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(236, 249, 255, 0.96));
+    box-shadow: 0 26px 60px -24px rgba(14, 58, 102, 0.5),
+                0 1px 0 rgba(255, 255, 255, 0.95) inset;
+}
+
+body[data-theme="aero"] .suggestion {
+    color: rgba(14, 58, 102, 0.78);
+}
+
+body[data-theme="aero"] .suggestion:hover,
+body[data-theme="aero"] .suggestion.is-active {
+    background: rgba(14, 58, 102, 0.08);
+    color: #0e3a66;
+}
+
+body[data-theme="aero"] .suggestion .s-icon {
+    border-color: rgba(14, 58, 102, 0.18);
+    background: rgba(255, 255, 255, 0.7);
+    color: rgba(14, 58, 102, 0.66);
+}
+
+body[data-theme="aero"] .suggestion.is-active .s-icon {
+    color: #0e3a66;
+    border-color: rgba(14, 58, 102, 0.4);
+}
+
+body[data-theme="aero"] .suggestion .s-enter,
+body[data-theme="aero"] .suggestion.is-active .s-enter {
+    color: #0e3a66;
+    border-color: rgba(14, 58, 102, 0.32);
+}
+
+/* Shortcuts: white translucent pills. */
+body[data-theme="aero"] .quick {
+    gap: 10px;
+    margin-top: 26px;
+}
+
+body[data-theme="aero"] .quick-link {
+    flex-direction: row;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    padding: 8px 15px 8px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.56);
+    color: #0e3a66;
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.9) inset,
+        0 10px 26px -16px rgba(14, 58, 102, 0.6);
+}
+
+body[data-theme="aero"] .quick-link:hover {
+    color: #062744;
+    background: rgba(255, 255, 255, 0.82);
+    border-color: #ffffff;
+    transform: translateY(-2px);
+}
+
+body[data-theme="aero"] .quick-icon {
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.72);
+    color: #0e3a66;
+    box-shadow: none;
+}
+
+body[data-theme="aero"] .quick-link:hover .quick-icon {
+    color: #062744;
+    border-color: #ffffff;
+    background: #ffffff;
+}
+
+body[data-theme="aero"] .toast {
+    border-color: rgba(255, 255, 255, 0.92);
+    background: rgba(255, 255, 255, 0.9);
+    color: #0e3a66;
+    box-shadow: 0 18px 44px -18px rgba(14, 58, 102, 0.55);
+}
+
+body[data-theme="aero"] ::selection {
+    background: rgba(14, 58, 102, 0.18);
+    color: #062744;
+}
+
 /* --- narrow --------------------------------------------------------------- */
 
 @media (max-width: 900px) {

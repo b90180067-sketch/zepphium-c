@@ -6,8 +6,10 @@ portable C17 core (`zoom`, `navigation`, `store`, `browser_core`).
 
 ![Dark chrome while browsing](../newtab/preview-browsing.png)
 
-Toàn bộ chrome dùng chung một bộ màu tối: title bar (DWM), tab strip, toolbar, ô địa
-chỉ và các nút điều hướng — kể cả khi tab đang mở một trang sáng.
+Chrome mặc định dùng chung một bộ màu tối: title bar (DWM), tab strip, toolbar, ô địa
+chỉ và các nút điều hướng — kể cả khi tab đang mở một trang sáng. Nút tròn ngay trái
+cụm zoom bật/tắt giao diện **Frutiger Aero** (gradient xanh, tab pill, nút tròn); lựa
+chọn được lưu trong `%LOCALAPPDATA%\Zephium\theme.txt` và áp dụng cho cả start page.
 
 ```
 windows/
@@ -105,6 +107,11 @@ lại, hoặc chạy bản build sẵn `zephium_win_newtab.exe` (cùng tính nă
   back/forward/reload/zoom owner-draw, ô địa chỉ borderless nền tối, tab active có
   gạch accent mint. Toolbar và tab strip giữ tông này cho mọi trang (kể cả trang sáng
   và start page), không quay về giao diện Win32 sáng.
+- **Frutiger Aero (tuỳ chọn)**: nút tròn `ID_THEME` (1008) ngay trái nút zoom-out.
+  Một click đổi palette, vẽ gradient xanh cho tab strip/toolbar, tab pill và nút
+  ellipse, đổi caption/border DWM, ghi `theme.txt` rồi đẩy theme vào mọi tab đang mở
+  start page. Mặc định vẫn là dark; file thiếu/rỗng/lạ hoặc `LOCALAPPDATA` không có
+  đều quay về dark.
 - Toolbar: back / forward / reload, ô địa chỉ, zoom -/+ (zoom theo từng tab), tiêu đề
   cửa sổ theo trang.
 - Đồng bộ URL + trạng thái back/forward mỗi 400 ms (không cần COM event handler).
@@ -116,6 +123,24 @@ lại, hoặc chạy bản build sẵn `zephium_win_newtab.exe` (cùng tính nă
   [Ad blocking](#ad-blocking-native-network-filtering) bên dưới.
 - Autoplay được bật (`--autoplay-policy=no-user-gesture-required`).
 - Log chẩn đoán: `windows/zephium_win.log`.
+
+### Theme (dark / Frutiger Aero)
+
+- **Mặc định**: dark, đúng geometry và màu của bản cũ. **Frutiger Aero** là tuỳ chọn:
+  tab strip/toolbar dùng `GradientFill`, tab là pill `RoundRect`, các nút là
+  `Ellipse`, caption và border DWM lấy theo `bg` của palette.
+- **Nút chuyển**: owner-draw `ID_THEME` (1008) nằm ngay trái nút zoom-out; mặt nút là
+  một ellipse nhỏ nên không phụ thuộc font symbol. Nút thuộc bộ control của toolbar
+  nên cũng ẩn khi start page full-bleed.
+- **Lưu**: `%LOCALAPPDATA%\Zephium\theme.txt`, UTF-8 không BOM, một dòng `dark` hoặc
+  `aero` (newline cuối dòng được bỏ qua). File thiếu/rỗng/nội dung lạ/đọc lỗi →
+  dark. Ghi lỗi → giữ theme trong phiên, log lỗi và **không** đụng file cũ (ghi qua
+  file tạm rồi `MoveFileEx` thay thế). Không có `LOCALAPPDATA` → không lưu.
+- **Start page**: sau mỗi lần click và mỗi `NavigationCompleted` của host
+  newtab (kể cả URL có `?`/`#`), shell gọi
+  `window.zephiumSetTheme("aero"|"dark")` bằng `ExecuteScript`. Hàm này chỉ đặt
+  `body.dataset.theme` và pause/resume vòng vẽ ASCII; không điều hướng và không gửi
+  message về shell. Lỗi `ExecuteScript` được log và lần navigation sau thử lại.
 
 ### Tuỳ chọn dòng lệnh
 
@@ -406,10 +431,16 @@ cùng lúc.
   như HTTP bình thường và trang không cần `file://`. Cầu `navigate|` chỉ nhận message
   từ trang có `Source` bắt đầu bằng `https://newtab.zephium/`; trang ngoài không thể
   điều khiển shell qua bridge.
-- Chrome tối: `WM_DRAWITEM` vẽ nút, `WM_CTLCOLOREDIT/STATIC` trả brush tối, còn
-  `DwmSetWindowAttribute` (attr 20 cho Win11, 19 cho Win10 20H1+, 35/34 cho caption và
-  border) đổi màu title bar. Khi toolbar ẩn, `ContentRect()` bắt đầu ngay dưới tab strip
-  để start page full-bleed.
+- Chrome: mọi màu đi qua `ChromePalette` + `Chrome()` (hai instance `kDarkPalette`,
+  `kAeroPalette`). `WM_DRAWITEM` vẽ nút, `WM_CTLCOLOREDIT/STATIC` trả brush được tạo
+  lại khi đổi theme, `DwmSetWindowAttribute` (attr 20 cho Win11, 19 cho Win10 20H1+,
+  35/34 cho caption và border) lấy `bg` của palette. Bản Aero dùng `GradientFill`
+  (`-lmsimg32`). Khi toolbar ẩn, `ContentRect()` bắt đầu ngay dưới tab strip để start
+  page full-bleed.
+- Theme → start page: `NavigationCompleted` (đăng ký trên mọi `ICoreWebView2`) gọi
+  `SendThemeToView()` nếu `IsNewTabUrl(Source)`; `PushThemeToNewTabViews()` làm việc
+  tương tự ngay sau click cho các tab đang mở. Script chỉ chạy trên view có URL
+  `newtab.zephium`, và `theme.txt` nằm ngoài profile SQLite.
 - Request của start page cũng đi qua ad blocker (cùng `WebResourceRequested`); các
   asset nội bộ này không khớp rule nào nên luôn được cho qua, và engine chưa sẵn sàng
   thì mọi request fail-open như bình thường.

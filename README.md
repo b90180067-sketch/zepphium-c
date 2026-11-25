@@ -77,11 +77,13 @@ hình nền ASCII động, omnibox ở giữa màn hình, 6 shortcut, đồng h�
   noise ngẫu nhiên.
 - **Tích hợp shell**: WebView2 map host `newtab.zephium` vào thư mục
   `newtab/`; khi start page active, hàng toolbar Win32 được ẩn để nội dung
-  full-bleed. Toàn bộ chrome — title bar (DWM), tab strip và toolbar — luôn dùng
-  tông tối với accent mint, kể cả khi tab đang mở YouTube hay một trang sáng;
-  các nút back/forward/reload/zoom và ô địa chỉ được owner-draw để không còn
-  mảng trắng Win32 cũ. Omnibox gửi `navigate|<input>` về shell, shell phân loại
-  URL/search bằng core C17 `navigation` rồi điều hướng tab.
+  full-bleed. Chrome mặc định dùng tông tối với accent mint, kể cả khi tab đang
+  mở YouTube hay một trang sáng; nút tròn ngay trái cụm zoom chuyển sang giao
+  diện **Frutiger Aero** (tab pill, nút tròn, gradient xanh) và lưu lựa chọn vào
+  `%LOCALAPPDATA%\Zephium\theme.txt`. Các nút back/forward/reload/zoom và ô địa
+  chỉ được owner-draw để không còn mảng trắng Win32 cũ. Omnibox gửi
+  `navigate|<input>` về shell, shell phân loại URL/search bằng core C17
+  `navigation` rồi điều hướng tab.
 - **Build core**:
   ```powershell
   powershell -ExecutionPolicy Bypass -File newtab\build.ps1

@@ -89,6 +89,7 @@ static_assert((int)COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER == ZEPHIUM_W2_CONTEXT
 #define ID_ZOOM_OUT 1005
 #define ID_ZOOM_IN 1006
 #define ID_ZOOM_LABEL 1007
+#define ID_THEME 1008
 #define ID_NEW_TAB 1010
 #define ID_CLOSE_TAB 1011
 #define ID_NEXT_TAB 1012
@@ -136,6 +137,7 @@ static HWND g_reload = nullptr;
 static HWND g_zoom_out = nullptr;
 static HWND g_zoom_in = nullptr;
 static HWND g_zoom_label = nullptr;
+static HWND g_theme_btn = nullptr;
 
 static HFONT g_tab_font = nullptr;
 static HFONT g_url_font = nullptr;
@@ -143,15 +145,70 @@ static HFONT g_icon_font = nullptr;
 static HBRUSH g_edit_brush = nullptr;
 static HBRUSH g_chrome_brush = nullptr;
 
-/* Dark chrome, always on. The start page, a dark site and a light site all sit
- * under the same ink, so the tab strip never flips to a different theme. */
-static const COLORREF kChromeBg = RGB(10, 14, 19);
-static const COLORREF kToolbarBg = RGB(11, 16, 22);
-static const COLORREF kFieldBg = RGB(13, 20, 28);
-static const COLORREF kChromeLine = RGB(31, 43, 55);
-static const COLORREF kChromeInk = RGB(232, 238, 245);
-static const COLORREF kChromeMuted = RGB(139, 152, 166);
-static const COLORREF kChromeAccent = RGB(124, 232, 196);
+/* One palette holds every colour the chrome paint path reads.  Dark is the
+ * default; the Frutiger Aero palette is the optional second instance. */
+struct ChromePalette {
+    COLORREF bg;
+    COLORREF bg_bottom;
+    COLORREF toolbar;
+    COLORREF toolbar_bottom;
+    COLORREF field;
+    COLORREF line;
+    COLORREF ink;
+    COLORREF muted;
+    COLORREF accent;
+    COLORREF tab_active;
+    COLORREF tab_hover;
+    COLORREF tab_idle;
+    COLORREF button;
+    COLORREF button_pressed;
+};
+
+static const ChromePalette kDarkPalette = {
+    RGB(10, 14, 19),   /* bg */
+    RGB(10, 14, 19),   /* bg_bottom */
+    RGB(11, 16, 22),   /* toolbar */
+    RGB(11, 16, 22),   /* toolbar_bottom */
+    RGB(13, 20, 28),   /* field */
+    RGB(31, 43, 55),   /* line */
+    RGB(232, 238, 245),/* ink */
+    RGB(139, 152, 166),/* muted */
+    RGB(124, 232, 196),/* accent */
+    RGB(24, 33, 44),   /* tab active */
+    RGB(18, 25, 34),   /* tab hover */
+    RGB(13, 19, 26),   /* tab idle */
+    RGB(15, 22, 30),   /* button */
+    RGB(28, 39, 51)    /* button pressed */
+};
+
+static const ChromePalette kAeroPalette = {
+    RGB(46, 158, 224), /* bg */
+    RGB(125, 206, 245),/* bg_bottom */
+    RGB(186, 230, 252),/* toolbar */
+    RGB(92, 176, 230), /* toolbar_bottom */
+    RGB(255, 255, 255),/* field */
+    RGB(255, 255, 255),/* line */
+    RGB(14, 58, 102),  /* ink */
+    RGB(255, 255, 255),/* muted */
+    RGB(255, 255, 255),/* accent */
+    RGB(236, 248, 255),/* tab active */
+    RGB(186, 224, 244),/* tab hover */
+    RGB(120, 190, 230),/* tab idle */
+    RGB(230, 246, 255),/* button */
+    RGB(176, 220, 242) /* button pressed */
+};
+
+enum ChromeTheme { kThemeDark = 0, kThemeAero = 1 };
+
+static ChromeTheme g_theme = kThemeDark;
+
+static const ChromePalette &Chrome() {
+    return g_theme == kThemeAero ? kAeroPalette : kDarkPalette;
+}
+
+static bool AeroTheme() {
+    return g_theme == kThemeAero;
+}
 
 static ICoreWebView2Environment *g_env = nullptr;
 static zephium_browser_context_t *g_core = nullptr;
@@ -193,6 +250,117 @@ static void Log(const wchar_t *fmt, ...) {
  * lands in the same file. */
 static void AdblockLogLine(const wchar_t *line) {
     Log(L"%ls", line);
+}
+
+/* --------------------------------------------------------------- theme file */
+/* The persisted theme is one UTF-8 line in
+ * %LOCALAPPDATA%\Zephium\theme.txt.  Every failure path falls back to dark so a
+ * missing, empty, unknown or unreadable file can never stop the shell starting. */
+static bool ThemeDirectory(std::wstring *dir) {
+    wchar_t local[32768] = {0};
+    const DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
+    if (len == 0 || len >= 32768 || local[0] == L'\0') return false;
+    *dir = std::wstring(local) + L"\\Zephium";
+    return true;
+}
+
+static ChromeTheme LoadTheme() {
+    std::wstring dir;
+    if (!ThemeDirectory(&dir)) {
+        Log(L"theme: LOCALAPPDATA unavailable; starting dark");
+        return kThemeDark;
+    }
+    const std::wstring path = dir + L"\\theme.txt";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            Log(L"theme: no theme.txt; using dark");
+        } else {
+            Log(L"theme: could not read %ls (error %lu); using dark", path.c_str(), error);
+        }
+        return kThemeDark;
+    }
+
+    char buffer[64] = {0};
+    DWORD read = 0;
+    const BOOL ok = ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr);
+    const DWORD error = ok ? 0 : GetLastError();
+    CloseHandle(file);
+    if (!ok) {
+        Log(L"theme: read failed for %ls (error %lu); using dark", path.c_str(), error);
+        return kThemeDark;
+    }
+
+    std::string value(buffer, (size_t)read);
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) value.pop_back();
+    if (value == "aero") {
+        Log(L"theme: theme.txt selects aero");
+        return kThemeAero;
+    }
+    if (value == "dark") {
+        Log(L"theme: theme.txt selects dark");
+        return kThemeDark;
+    }
+    Log(L"theme: theme.txt is empty or unknown; using dark");
+    return kThemeDark;
+}
+
+/* Write through a sibling temporary file and replace atomically: a failed write
+ * must leave the previous theme.txt exactly as it was. */
+static bool SaveTheme(ChromeTheme theme) {
+    std::wstring dir;
+    if (!ThemeDirectory(&dir)) {
+        Log(L"theme: LOCALAPPDATA unavailable; theme not persisted");
+        return false;
+    }
+    if (!CreateDirectoryW(dir.c_str(), nullptr)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS) {
+            Log(L"theme: could not create %ls (error %lu); theme not persisted", dir.c_str(),
+                error);
+            return false;
+        }
+    }
+
+    const std::wstring path = dir + L"\\theme.txt";
+    const std::wstring temporary = path + L".tmp";
+    const std::string text = theme == kThemeAero ? "aero" : "dark";
+
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        Log(L"theme: could not open %ls for writing (error %lu); theme not persisted",
+            temporary.c_str(), GetLastError());
+        return false;
+    }
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(file, text.data(), (DWORD)text.size(), &written, nullptr);
+    DWORD error = ok ? 0 : GetLastError();
+    if (ok) {
+        ok = FlushFileBuffers(file);
+        if (!ok) error = GetLastError();
+    }
+    CloseHandle(file);
+
+    if (!ok || written != (DWORD)text.size()) {
+        Log(L"theme: write failed for %ls (error %lu); previous theme.txt kept", path.c_str(),
+            error);
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        Log(L"theme: replace failed for %ls (error %lu); previous theme.txt kept", path.c_str(),
+            GetLastError());
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    Log(L"theme: saved %ls", theme == kThemeAero ? L"aero" : L"dark");
+    return true;
 }
 
 static std::string WideToUtf8(const std::wstring &w) {
@@ -264,13 +432,48 @@ static bool IsNewTabUrl(const std::wstring &url) {
            url.rfind(g_newtab_url + L"#", 0) == 0;
 }
 
+/* A tab can be showing the start page before the 400 ms timer has copied the
+ * committed URL into tab->url, so consult the live view as well. */
+static bool TabShowsNewTabPage(ZephiumTab *tab) {
+    if (!tab) return false;
+    if (IsNewTabUrl(tab->url)) return true;
+    if (!tab->view) return false;
+    LPWSTR source = nullptr;
+    if (FAILED(tab->view->get_Source(&source)) || !source) return false;
+    const bool matches = IsNewTabUrl(source);
+    CoTaskMemFree(source);
+    return matches;
+}
+
+/* The page's zephiumSetTheme() only flips data-theme and pauses/resumes the
+ * ASCII loop; it never navigates or calls back into the shell. */
+static void SendThemeToView(ZephiumTab *tab) {
+    if (!tab || !tab->view) return;
+    const wchar_t *script = AeroTheme() ? L"window.zephiumSetTheme(\"aero\");"
+                                        : L"window.zephiumSetTheme(\"dark\");";
+    const HRESULT hr = tab->view->ExecuteScript(script, nullptr);
+    if (FAILED(hr)) {
+        Log(L"theme: ExecuteScript failed for tab id=%d (0x%08lx)", tab->id,
+            (unsigned long)hr);
+    }
+}
+
+/* Every open start-page view follows a theme click immediately, including
+ * views in inactive tabs; a view that is still navigating gets it again from
+ * its NavigationCompleted handler. */
+static void PushThemeToNewTabViews() {
+    for (ZephiumTab *tab : g_tabs) {
+        if (tab && tab->view && TabShowsNewTabPage(tab)) SendThemeToView(tab);
+    }
+}
+
 static std::wstring NewTabUrl() {
     return g_newtab_url.empty() ? std::wstring(L"about:blank") : g_newtab_url;
 }
 
-/* Keep the caption in the same ink as the start page. dwmapi is loaded on
- * demand so the shell still runs on systems without it. */
-static void SetDarkTitleBar() {
+/* The DWM caption and border follow the active palette's bg. dwmapi is loaded
+ * on demand so the shell still runs on systems without it. */
+static void SetTitleBarColors() {
     if (!g_hwnd) return;
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
     if (!dwm) return;
@@ -279,15 +482,52 @@ static void SetDarkTitleBar() {
     DwmSetAttributeFn set_attribute = nullptr;
     memcpy(&set_attribute, &proc, sizeof(set_attribute));
     if (set_attribute) {
-        BOOL enabled = TRUE;
+        BOOL enabled = g_theme == kThemeDark ? TRUE : FALSE;
         set_attribute(g_hwnd, 20, &enabled, sizeof(enabled)); /* Win11 */
         set_attribute(g_hwnd, 19, &enabled, sizeof(enabled)); /* Win10 20H1+ */
-        COLORREF caption = kChromeBg;
+        COLORREF caption = Chrome().bg;
         set_attribute(g_hwnd, 35, &caption, sizeof(caption)); /* caption colour */
-        COLORREF border = kChromeBg;
+        COLORREF border = Chrome().bg;
         set_attribute(g_hwnd, 34, &border, sizeof(border));   /* border colour */
     }
     FreeLibrary(dwm);
+}
+
+/* Re-derive the brushes the controls pull their background from, then repaint
+ * the whole chrome (owner-draw buttons and the address field included). */
+static void ApplyThemeToChrome() {
+    if (g_edit_brush) {
+        DeleteObject(g_edit_brush);
+        g_edit_brush = nullptr;
+    }
+    if (g_chrome_brush) {
+        DeleteObject(g_chrome_brush);
+        g_chrome_brush = nullptr;
+    }
+    g_edit_brush = CreateSolidBrush(Chrome().field);
+    g_chrome_brush = CreateSolidBrush(Chrome().toolbar);
+
+    SetTitleBarColors();
+    if (g_hwnd) {
+        RedrawWindow(g_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+        HWND controls[] = {g_back,      g_forward,   g_reload,     g_url,
+                           g_theme_btn, g_zoom_out,  g_zoom_label, g_zoom_in};
+        for (HWND control : controls) {
+            if (control && IsWindowVisible(control)) {
+                RedrawWindow(control, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+            }
+        }
+    }
+}
+
+/* One click swaps the palettes, persists the choice and lets every open start
+ * page know. URLs, zoom, hibernation and ad blocking are untouched. */
+static void ToggleTheme() {
+    g_theme = AeroTheme() ? kThemeDark : kThemeAero;
+    ApplyThemeToChrome();
+    SaveTheme(g_theme);
+    PushThemeToNewTabViews();
+    Log(L"theme: switched to %ls", AeroTheme() ? L"aero" : L"dark");
 }
 
 static RECT ContentRect() {
@@ -468,20 +708,60 @@ static void ComputeTabGeometry(int client_width) {
     g_geo.plus = {x + 4, 5, x + 4 + 24, ZEPHIUM_TABBAR_HEIGHT - 6};
 }
 
+static void FillVerticalGradient(HDC dc, const RECT &r, COLORREF top, COLORREF bottom) {
+    TRIVERTEX vertex[2];
+    vertex[0].x = r.left;
+    vertex[0].y = r.top;
+    vertex[0].Red = (COLOR16)(GetRValue(top) << 8);
+    vertex[0].Green = (COLOR16)(GetGValue(top) << 8);
+    vertex[0].Blue = (COLOR16)(GetBValue(top) << 8);
+    vertex[0].Alpha = 0;
+    vertex[1].x = r.right;
+    vertex[1].y = r.bottom;
+    vertex[1].Red = (COLOR16)(GetRValue(bottom) << 8);
+    vertex[1].Green = (COLOR16)(GetGValue(bottom) << 8);
+    vertex[1].Blue = (COLOR16)(GetBValue(bottom) << 8);
+    vertex[1].Alpha = 0;
+    GRADIENT_RECT mesh = {0, 1};
+    if (!GradientFill(dc, vertex, 2, &mesh, 1, GRADIENT_FILL_RECT_V)) {
+        HBRUSH fallback = CreateSolidBrush(top);
+        FillRect(dc, &r, fallback);
+        DeleteObject(fallback);
+    }
+}
+
+static void FillRoundRect(HDC dc, const RECT &r, COLORREF fill, COLORREF border, int radius) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ old_brush = SelectObject(dc, brush);
+    HGDIOBJ old_pen = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
 static void DrawTabStrip(HDC dc, int client_width) {
     ComputeTabGeometry(client_width);
+    const ChromePalette &palette = Chrome();
+    const bool aero = AeroTheme();
 
     RECT strip = {0, 0, client_width, ZEPHIUM_TABBAR_HEIGHT};
-    HBRUSH background = CreateSolidBrush(kChromeBg);
-    FillRect(dc, &strip, background);
-    DeleteObject(background);
+    if (aero) {
+        FillVerticalGradient(dc, strip, palette.bg, palette.bg_bottom);
+    } else {
+        HBRUSH background = CreateSolidBrush(palette.bg);
+        FillRect(dc, &strip, background);
+        DeleteObject(background);
+    }
 
     RECT bottom_line = {0, ZEPHIUM_TABBAR_HEIGHT - 1, client_width, ZEPHIUM_TABBAR_HEIGHT};
-    HBRUSH line_brush = CreateSolidBrush(kChromeLine);
+    HBRUSH line_brush = CreateSolidBrush(palette.line);
     FillRect(dc, &bottom_line, line_brush);
     DeleteObject(line_brush);
 
-    HBRUSH border_brush = CreateSolidBrush(kChromeLine);
+    HBRUSH border_brush = CreateSolidBrush(palette.line);
 
     SetBkMode(dc, TRANSPARENT);
     HFONT font = g_tab_font ? g_tab_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -492,15 +772,22 @@ static void DrawTabStrip(HDC dc, int client_width) {
         const bool active = ((int)i == g_active);
         const bool hovered = PtInRect(&r, g_mouse) != 0;
 
-        COLORREF face = active ? RGB(24, 33, 44) : (hovered ? RGB(18, 25, 34) : RGB(13, 19, 26));
-        HBRUSH brush = CreateSolidBrush(face);
-        FillRect(dc, &r, brush);
-        DeleteObject(brush);
-        FrameRect(dc, &r, border_brush);
+        COLORREF face = active ? palette.tab_active
+                               : (hovered ? palette.tab_hover : palette.tab_idle);
+        if (aero) {
+            FillRoundRect(dc, r, face, palette.line, r.bottom - r.top);
+        } else {
+            HBRUSH brush = CreateSolidBrush(face);
+            FillRect(dc, &r, brush);
+            DeleteObject(brush);
+            FrameRect(dc, &r, border_brush);
+        }
 
-        if (active) {
+        /* The dark theme keeps its mint underline; aero signals the active tab
+         * with the lightest pill instead. */
+        if (active && !aero) {
             RECT accent = {r.left + 9, r.bottom - 2, r.right - 9, r.bottom};
-            HBRUSH accent_brush = CreateSolidBrush(kChromeAccent);
+            HBRUSH accent_brush = CreateSolidBrush(palette.accent);
             FillRect(dc, &accent, accent_brush);
             DeleteObject(accent_brush);
         }
@@ -509,28 +796,42 @@ static void DrawTabStrip(HDC dc, int client_width) {
         if (IsNewTabUrl(g_tabs[i]->url)) label = L"Tab mới";
         if (label.empty()) label = L"New Tab";
         RECT text = {r.left + 9, r.top, r.right - 23, r.bottom};
-        SetTextColor(dc, active ? kChromeInk : kChromeMuted);
+        SetTextColor(dc, active ? palette.ink : palette.muted);
         DrawTextW(dc, label.c_str(), -1, &text,
                   DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
         const RECT &close = g_geo.closes[i];
         const bool close_hovered = PtInRect(&close, g_mouse) != 0;
         if (close_hovered) {
-            HBRUSH hot = CreateSolidBrush(RGB(190, 86, 86));
-            FillRect(dc, &close, hot);
-            DeleteObject(hot);
+            if (aero) {
+                const int radius = std::min(close.right - close.left, close.bottom - close.top);
+                FillRoundRect(dc, close, palette.accent, palette.line, radius);
+            } else {
+                HBRUSH hot = CreateSolidBrush(palette.accent);
+                FillRect(dc, &close, hot);
+                DeleteObject(hot);
+            }
         }
-        SetTextColor(dc, close_hovered ? RGB(255, 255, 255) : kChromeMuted);
-        DrawTextW(dc, L"\u00D7", -1, (RECT *)&close, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        SetTextColor(dc, close_hovered ? palette.bg
+                                       : (aero ? palette.ink : palette.muted));
+        DrawTextW(dc, L"\u00D7", -1, (RECT *)&close,
+                  DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     }
 
     const bool plus_hovered = PtInRect(&g_geo.plus, g_mouse) != 0;
-    HBRUSH plus_brush = CreateSolidBrush(plus_hovered ? RGB(24, 33, 44) : RGB(13, 19, 26));
-    FillRect(dc, &g_geo.plus, plus_brush);
-    DeleteObject(plus_brush);
-    FrameRect(dc, &g_geo.plus, border_brush);
-    SetTextColor(dc, kChromeInk);
-    DrawTextW(dc, L"+", -1, &g_geo.plus, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+    const COLORREF plus_face = plus_hovered ? palette.tab_active : palette.tab_idle;
+    if (aero) {
+        FillRoundRect(dc, g_geo.plus, plus_face, palette.line,
+                      g_geo.plus.bottom - g_geo.plus.top);
+    } else {
+        HBRUSH plus_brush = CreateSolidBrush(plus_face);
+        FillRect(dc, &g_geo.plus, plus_brush);
+        DeleteObject(plus_brush);
+        FrameRect(dc, &g_geo.plus, border_brush);
+    }
+    SetTextColor(dc, palette.ink);
+    DrawTextW(dc, L"+", -1, &g_geo.plus,
+              DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
 
     DeleteObject(border_brush);
     SelectObject(dc, old_font);
@@ -555,11 +856,15 @@ static void LayoutChildren() {
     const int zoom_in_x = width - 8 - 30;
     const int label_x = zoom_in_x - 6 - 52;
     const int zoom_out_x = label_x - 6 - 30;
+    const int theme_x = zoom_out_x - 6 - 30;
     const int url_x = x + 2;
-    int url_w = zoom_out_x - 8 - (url_x - 2);
-    if (url_w < 120) url_w = 120;
+    int url_w = theme_x - 8 - (url_x - 2);
+    /* The edit itself is url_w - 4 wide (the 2 px field frame is drawn around
+     * it on each side), so reserve 124 px to keep the address field >= 120 px. */
+    if (url_w < 124) url_w = 124;
 
     if (g_url) MoveWindow(g_url, url_x, top + 2, url_w - 4, height - 4, TRUE);
+    if (g_theme_btn) MoveWindow(g_theme_btn, theme_x, top, 30, height, TRUE);
     if (g_zoom_out) MoveWindow(g_zoom_out, zoom_out_x, top, 30, height, TRUE);
     if (g_zoom_label) MoveWindow(g_zoom_label, label_x, top, 52, height, TRUE);
     if (g_zoom_in) MoveWindow(g_zoom_in, zoom_in_x, top, 30, height, TRUE);
@@ -575,6 +880,15 @@ static void UpdateZoomLabel() {
     wchar_t buf[32];
     swprintf(buf, 32, L"%d%%", g_zoom_percent);
     SetWindowTextW(g_zoom_label, buf);
+    if (g_hwnd && !g_newtab_mode) {
+        /* The percentage is painted by DrawToolbar; a hidden STATIC does not
+         * repaint its parent when its text changes. */
+        RECT bar = {0, ZEPHIUM_TABBAR_HEIGHT, 0, ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT};
+        GetClientRect(g_hwnd, &bar);
+        bar.top = ZEPHIUM_TABBAR_HEIGHT;
+        bar.bottom = ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT;
+        InvalidateRect(g_hwnd, &bar, FALSE);
+    }
 }
 
 /* The start page is a full-bleed surface: the tab strip stays, the URL row
@@ -583,12 +897,13 @@ static void ApplyNewTabMode(bool on) {
     if (g_newtab_mode == on) return;
     g_newtab_mode = on;
 
-    HWND controls[] = {g_back, g_forward, g_reload, g_url, g_zoom_out, g_zoom_label, g_zoom_in};
+    HWND controls[] = {g_back, g_forward, g_reload, g_url, g_theme_btn, g_zoom_out,
+                       g_zoom_in};
     for (HWND control : controls) {
         if (control) ShowWindow(control, on ? SW_HIDE : SW_SHOW);
     }
     LayoutChildren();
-    SetDarkTitleBar();
+    SetTitleBarColors();
     if (g_hwnd) {
         RECT rc;
         GetClientRect(g_hwnd, &rc);
@@ -1008,6 +1323,21 @@ private:
     int m_tab_id;
 };
 
+/* Navigation completion for a start-page view is the reliable moment to hand it
+ * the theme: the page's own script has run by then, and a view that was still
+ * loading when the theme was clicked gets a second chance. */
+class ZephiumNavigationCompletedHandler
+    : public ZephiumCom<ICoreWebView2NavigationCompletedEventHandler,
+                        &IID_ICoreWebView2NavigationCompletedEventHandler> {
+public:
+    explicit ZephiumNavigationCompletedHandler(int tab_id) : m_tab_id(tab_id) {}
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 *sender,
+                                     ICoreWebView2NavigationCompletedEventArgs *args) override;
+
+private:
+    int m_tab_id;
+};
+
 HRESULT STDMETHODCALLTYPE ZephiumWebResourceHandler::Invoke(
     ICoreWebView2 *, ICoreWebView2WebResourceRequestedEventArgs *args) {
     /* No exception may escape into WebView2, and every early return leaves the
@@ -1156,6 +1486,26 @@ HRESULT STDMETHODCALLTYPE ZephiumSourceChangedHandler::Invoke(
             if (!url.empty()) tab->adblock.SetDocumentUrl(url);
         }
     } catch (...) {
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE ZephiumNavigationCompletedHandler::Invoke(
+    ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *) {
+    try {
+        if (!sender) return S_OK;
+        ZephiumTab *tab = FindTabById(m_tab_id);
+        if (!tab || !tab->view) return S_OK;
+        /* Ask the sender for the committed URL, so "?query" and "#hash" forms
+         * are recognised by the same IsNewTabUrl predicate as everywhere else. */
+        LPWSTR value = nullptr;
+        if (SUCCEEDED(sender->get_Source(&value)) && value) {
+            std::wstring source(value);
+            CoTaskMemFree(value);
+            if (IsNewTabUrl(source)) SendThemeToView(tab);
+        }
+    } catch (...) {
+        Log(L"theme: exception while pushing the theme after navigation");
     }
     return S_OK;
 }
@@ -1513,6 +1863,12 @@ HRESULT STDMETHODCALLTYPE ZephiumControllerHandler::Invoke(HRESULT result, ICore
     EventRegistrationToken newwindow_token = {};
     tab->view->add_NewWindowRequested(new ZephiumNewWindowHandler(tab->id), &newwindow_token);
 
+    EventRegistrationToken navigation_token = {};
+    ZephiumNavigationCompletedHandler *navigation_completed =
+        new ZephiumNavigationCompletedHandler(tab->id);
+    tab->view->add_NavigationCompleted(navigation_completed, &navigation_token);
+    navigation_completed->Release();
+
     EventRegistrationToken permission_token = {};
     tab->view->add_PermissionRequested(new ZephiumPermissionHandler(), &permission_token);
 
@@ -1785,14 +2141,20 @@ HRESULT STDMETHODCALLTYPE ZephiumDownloadStateHandler::Invoke(ICoreWebView2Downl
 
 static void DrawChromeButton(const DRAWITEMSTRUCT *item) {
     if (!item) return;
+    const ChromePalette &palette = Chrome();
+    const bool aero = AeroTheme();
+    const bool theme_button = item->CtlID == ID_THEME;
+
     const wchar_t *glyph = nullptr;
-    switch (item->CtlID) {
-    case ID_BACK: glyph = L"\u2190"; break;
-    case ID_FORWARD: glyph = L"\u2192"; break;
-    case ID_RELOAD: glyph = L"\u21BB"; break;
-    case ID_ZOOM_OUT: glyph = L"\u2212"; break;
-    case ID_ZOOM_IN: glyph = L"+"; break;
-    default: return;
+    if (!theme_button) {
+        switch (item->CtlID) {
+        case ID_BACK: glyph = L"\u2190"; break;
+        case ID_FORWARD: glyph = L"\u2192"; break;
+        case ID_RELOAD: glyph = L"\u21BB"; break;
+        case ID_ZOOM_OUT: glyph = L"\u2212"; break;
+        case ID_ZOOM_IN: glyph = L"+"; break;
+        default: return;
+        }
     }
 
     const bool disabled = (item->itemState & ODS_DISABLED) != 0;
@@ -1803,9 +2165,10 @@ static void DrawChromeButton(const DRAWITEMSTRUCT *item) {
     r.right -= 1;
     r.bottom -= 1;
 
-    COLORREF fill = pressed ? RGB(28, 39, 51) : RGB(15, 22, 30);
-    COLORREF border = focused ? kChromeAccent : (pressed ? RGB(52, 71, 87) : kChromeLine);
-    COLORREF ink = disabled ? RGB(92, 104, 116) : kChromeInk;
+    const COLORREF fill = pressed ? palette.button_pressed : palette.button;
+    const COLORREF border =
+        focused ? (aero ? palette.ink : palette.accent) : palette.line;
+    const COLORREF ink = disabled ? palette.muted : palette.ink;
 
     HBRUSH brush = CreateSolidBrush(fill);
     HPEN pen = CreatePen(PS_SOLID, 1, border);
@@ -1813,16 +2176,37 @@ static void DrawChromeButton(const DRAWITEMSTRUCT *item) {
     HGDIOBJ old_pen = SelectObject(item->hDC, pen);
 
     SetBkMode(item->hDC, TRANSPARENT);
-    RoundRect(item->hDC, r.left, r.top, r.right, r.bottom, 9, 9);
+    if (aero) {
+        Ellipse(item->hDC, r.left, r.top, r.right, r.bottom);
+    } else {
+        RoundRect(item->hDC, r.left, r.top, r.right, r.bottom, 9, 9);
+    }
 
-    HFONT font = g_icon_font ? g_icon_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HGDIOBJ old_font = SelectObject(item->hDC, font);
-    SetTextColor(item->hDC, ink);
-    RECT text = item->rcItem;
-    DrawTextW(item->hDC, glyph, -1, &text,
-              DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+    if (theme_button) {
+        /* A plain filled dot: the control never depends on a symbol font. */
+        const int cx = (r.left + r.right) / 2;
+        const int cy = (r.top + r.bottom) / 2;
+        const int radius = 5;
+        const COLORREF dot_color = aero ? palette.ink : palette.accent;
+        HBRUSH dot_brush = CreateSolidBrush(dot_color);
+        HPEN dot_pen = CreatePen(PS_SOLID, 1, dot_color);
+        HGDIOBJ old_dot_brush = SelectObject(item->hDC, dot_brush);
+        HGDIOBJ old_dot_pen = SelectObject(item->hDC, dot_pen);
+        Ellipse(item->hDC, cx - radius, cy - radius, cx + radius + 1, cy + radius + 1);
+        SelectObject(item->hDC, old_dot_pen);
+        SelectObject(item->hDC, old_dot_brush);
+        DeleteObject(dot_pen);
+        DeleteObject(dot_brush);
+    } else {
+        HFONT font = g_icon_font ? g_icon_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HGDIOBJ old_font = SelectObject(item->hDC, font);
+        SetTextColor(item->hDC, ink);
+        RECT text = item->rcItem;
+        DrawTextW(item->hDC, glyph, -1, &text,
+                  DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        SelectObject(item->hDC, old_font);
+    }
 
-    SelectObject(item->hDC, old_font);
     SelectObject(item->hDC, old_pen);
     SelectObject(item->hDC, old_brush);
     DeleteObject(pen);
@@ -1830,14 +2214,21 @@ static void DrawChromeButton(const DRAWITEMSTRUCT *item) {
 }
 
 static void DrawToolbar(HDC dc, int width) {
+    const ChromePalette &palette = Chrome();
+    const bool aero = AeroTheme();
+
     RECT bar = {0, ZEPHIUM_TABBAR_HEIGHT, width, ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT};
-    HBRUSH background = CreateSolidBrush(kToolbarBg);
-    FillRect(dc, &bar, background);
-    DeleteObject(background);
+    if (aero) {
+        FillVerticalGradient(dc, bar, palette.toolbar, palette.toolbar_bottom);
+    } else {
+        HBRUSH background = CreateSolidBrush(palette.toolbar);
+        FillRect(dc, &bar, background);
+        DeleteObject(background);
+    }
 
     RECT bottom = {0, ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT - 1, width,
                    ZEPHIUM_TABBAR_HEIGHT + ZEPHIUM_TOOLBAR_HEIGHT};
-    HBRUSH line = CreateSolidBrush(kChromeLine);
+    HBRUSH line = CreateSolidBrush(palette.line);
     FillRect(dc, &bottom, line);
     DeleteObject(line);
 
@@ -1848,8 +2239,10 @@ static void DrawToolbar(HDC dc, int width) {
         InflateRect(&field, 2, 2);
 
         const bool focused = GetFocus() == g_url;
-        HBRUSH fill = CreateSolidBrush(kFieldBg);
-        HPEN pen = CreatePen(PS_SOLID, 1, focused ? kChromeAccent : kChromeLine);
+        const COLORREF field_border =
+            focused ? (aero ? palette.ink : palette.accent) : palette.line;
+        HBRUSH fill = CreateSolidBrush(palette.field);
+        HPEN pen = CreatePen(PS_SOLID, 1, field_border);
         HGDIOBJ old_brush = SelectObject(dc, fill);
         HGDIOBJ old_pen = SelectObject(dc, pen);
         RoundRect(dc, field.left, field.top, field.right, field.bottom, 12, 12);
@@ -1864,9 +2257,25 @@ static void DrawToolbar(HDC dc, int width) {
         GetWindowRect(g_zoom_out, &r);
         MapWindowPoints(HWND_DESKTOP, g_hwnd, (POINT *)&r, 2);
         RECT divider = {r.left - 9, r.top + 7, r.left - 8, r.bottom - 7};
-        HBRUSH div_brush = CreateSolidBrush(kChromeLine);
+        HBRUSH div_brush = CreateSolidBrush(palette.line);
         FillRect(dc, &divider, div_brush);
         DeleteObject(div_brush);
+    }
+
+    /* Painted here, not by a STATIC child, so it sits on the gradient itself. */
+    if (g_zoom_label) {
+        RECT label;
+        GetWindowRect(g_zoom_label, &label);
+        MapWindowPoints(HWND_DESKTOP, g_hwnd, (POINT *)&label, 2);
+        wchar_t text[32];
+        swprintf(text, 32, L"%d%%", g_zoom_percent);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, palette.muted);
+        HFONT font = g_tab_font ? g_tab_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HGDIOBJ old_font = SelectObject(dc, font);
+        DrawTextW(dc, text, -1, &label,
+                  DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        SelectObject(dc, old_font);
     }
 }
 
@@ -1892,8 +2301,8 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         g_icon_font = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
-        g_edit_brush = CreateSolidBrush(kFieldBg);
-        g_chrome_brush = CreateSolidBrush(kToolbarBg);
+        g_edit_brush = CreateSolidBrush(Chrome().field);
+        g_chrome_brush = CreateSolidBrush(Chrome().toolbar);
 
         const int top = ZEPHIUM_TABBAR_HEIGHT + 6;
         g_back = CreateWindowExW(0, L"BUTTON", L"\u2190",
@@ -1908,11 +2317,16 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         g_url = CreateWindowExW(0, L"EDIT", L"",
                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                 112, top + 2, 600, 26, hwnd, (HMENU)ID_URL, inst, nullptr);
+        g_theme_btn = CreateWindowExW(0, L"BUTTON", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                      0, top, 30, 30, hwnd, (HMENU)ID_THEME, inst, nullptr);
         g_zoom_out = CreateWindowExW(0, L"BUTTON", L"\u2212",
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                      0, top, 30, 30, hwnd, (HMENU)ID_ZOOM_OUT, inst, nullptr);
+        /* The percentage is painted by DrawToolbar, over the palette gradient:
+         * a separate STATIC would erase its own rectangle in a solid colour. */
         g_zoom_label = CreateWindowExW(0, L"STATIC", L"100%",
-                                       WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+                                       WS_CHILD | SS_CENTER | SS_CENTERIMAGE,
                                        0, top, 52, 30, hwnd, (HMENU)ID_ZOOM_LABEL, inst, nullptr);
         g_zoom_in = CreateWindowExW(0, L"BUTTON", L"+",
                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -1932,7 +2346,7 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         EnableWindow(g_forward, FALSE);
         UpdateZoomLabel();
         LayoutChildren();
-        SetDarkTitleBar();
+        SetTitleBarColors();
         return 0;
     }
 
@@ -1973,8 +2387,8 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     case WM_CTLCOLOREDIT: {
         HDC dc = (HDC)wparam;
         if ((HWND)lparam == g_url) {
-            SetTextColor(dc, kChromeInk);
-            SetBkColor(dc, kFieldBg);
+            SetTextColor(dc, Chrome().ink);
+            SetBkColor(dc, Chrome().field);
             return (LRESULT)g_edit_brush;
         }
         break;
@@ -1982,8 +2396,8 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)wparam;
-        SetTextColor(dc, kChromeMuted);
-        SetBkColor(dc, kToolbarBg);
+        SetTextColor(dc, Chrome().muted);
+        SetBkColor(dc, Chrome().toolbar);
         return (LRESULT)g_chrome_brush;
     }
 
@@ -2063,6 +2477,9 @@ static LRESULT CALLBACK ZephiumWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
                 if (tab->view) tab->view->Reload();
             }
             return 0;
+        case ID_THEME:
+            ToggleTheme();
+            return 0;
         case ID_ZOOM_IN:
             ZoomStep(true);
             return 0;
@@ -2119,6 +2536,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g_log_path = g_exe_dir + L"\\zephium_win.log";
     Log(L"---- Zephium Windows shell starting ----");
     RestrictFileToOwner(g_log_path);
+
+    /* The persisted theme is read before the window exists so the very first
+     * paint already uses the right palette. */
+    g_theme = LoadTheme();
+    Log(L"theme: active palette %ls", g_theme == kThemeAero ? L"aero" : L"dark");
 
     /* Ad blocking is on unless the environment or the command line turns it off.
      * The switch only controls the native filter engine; browsing never depends
@@ -2199,7 +2621,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         return 1;
     }
     ShowWindow(hwnd, show);
-    SetDarkTitleBar();
+    SetTitleBarColors();
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     UpdateWindow(hwnd);

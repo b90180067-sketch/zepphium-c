@@ -164,6 +164,7 @@
     let activeIndex = -1;
     let toastTimer = 0;
     let resizeTimer = 0;
+    let rafId = 0;
 
     /* ---------------------------------------------------------------- utils */
 
@@ -306,6 +307,7 @@
 
     function drawAt(t) {
         if (!state.exports || !state.cells) return;
+        if (document.body.dataset.theme === 'aero') return;
         state.exports.ascii_render(t, state.scene, state.cols, state.rows, state.aspect);
         paint();
     }
@@ -377,7 +379,7 @@
 
     function loop(now) {
         if (!state.running) return;
-        window.requestAnimationFrame(loop);
+        rafId = window.requestAnimationFrame(loop);
         if (document.hidden) return;
         if (now - state.lastDraw < FRAME_MS) return;
         state.lastDraw = now;
@@ -394,6 +396,36 @@
             updateGridMeta();
         }
     }
+
+    /* ---------------------------------------------------------------- theme */
+    /* Called by the shell with "aero" or "dark" through ExecuteScript. It only
+     * flips data-theme and stops/resumes the render loop; it never navigates and
+     * never posts a message back to the shell. */
+    function zephiumSetTheme(theme) {
+        if (theme !== 'aero' && theme !== 'dark') return;
+        document.body.dataset.theme = theme;
+
+        if (theme === 'aero') {
+            state.running = false;
+            if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+            return;
+        }
+
+        if (reduceMotion) {
+            if (state.exports) drawAt(9);
+            return;
+        }
+        if (state.exports && !state.running) {
+            state.running = true;
+            state.lastDraw = 0;
+            rafId = window.requestAnimationFrame(loop);
+        }
+    }
+
+    window.zephiumSetTheme = zephiumSetTheme;
 
     /* --------------------------------------------------------------- scenes */
 
@@ -731,9 +763,9 @@
 
         if (reduceMotion) {
             drawAt(9);
-        } else {
+        } else if (document.body.dataset.theme !== 'aero') {
             state.running = true;
-            window.requestAnimationFrame(loop);
+            rafId = window.requestAnimationFrame(loop);
         }
     }
 

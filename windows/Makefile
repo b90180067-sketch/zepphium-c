@@ -47,10 +47,11 @@ PREFIX_MAP = -ffile-prefix-map=$(CURDIR)=. -ffile-prefix-map=$(CURDIR)/..=.
 CFLAGS = -std=c17 -Wall -Wextra -O2 -I.. $(SQLITE_CFLAGS) $(PREFIX_MAP)
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -DUNICODE -D_UNICODE -I.. -I$(SDK_INC) $(PREFIX_MAP)
 # -lwinhttp/-lshlwapi: filter list downloads + SHCreateMemStream.
+# -lmsimg32: GradientFill for the optional Frutiger Aero chrome.
 # -lsynchronization: Rust std's futex (WaitOnAddress/WakeByAddress*) is not in
 # this MinGW's kernel32 import library. -lws2_32 -luserenv -lntdll are the rest of
 # the Rust std Windows dependencies.
-LIBS = $(SQLITE_LIBS) -lole32 -luser32 -lgdi32 -lshell32 -lbcrypt -ladvapi32 \
+LIBS = $(SQLITE_LIBS) -lole32 -luser32 -lgdi32 -lmsimg32 -lshell32 -lbcrypt -ladvapi32 \
        -lwinhttp -lshlwapi -lsynchronization -lws2_32 -luserenv -lntdll
 
 CORE_OBJS = obj/zoom_port.o obj/geometry_port.o obj/ids_port.o obj/navigation_port.o obj/blocker_port.o obj/store_port.o obj/browser_core_port.o

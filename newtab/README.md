@@ -33,8 +33,8 @@ and gcc (for the demo). No npm packages.
 | File | What it is |
 |---|---|
 | `index.html` | Page structure, inline SVG icon sprite |
-| `newtab.css` | Glass omnibox, scene palettes, responsive layout |
-| `newtab.js` | Wasm loader, canvas painter, clock, suggestions, scene switch |
+| `newtab.css` | Glass omnibox, scene palettes, Frutiger Aero override, responsive layout |
+| `newtab.js` | Wasm loader, canvas painter, clock, suggestions, scene switch, `zephiumSetTheme` |
 | `ascii_core.c` / `.h` | C17 wallpaper core: three hand-drawn scenes |
 | `ascii_demo.c` | Native terminal preview of the same core |
 | `build.ps1` | Builds `ascii_core.wasm`, `ascii_core_embed.js`, `ascii_demo.exe` |
@@ -69,6 +69,23 @@ needed and the module imports nothing.
 Peaks are authored (position / height / slope) rather than sampled from noise;
 small fBm noise keeps the ridge line from looking ruler-straight.
 
+## Themes
+
+The shell (and anyone debugging the page) can call
+`window.zephiumSetTheme("aero")` or `window.zephiumSetTheme("dark")`:
+
+* `aero` sets `document.body.dataset.theme`, hides `#art`, `.atmosphere`,
+  `.grain`, `.scenes`, the ASCII kicker and the core/scene/grid footer text,
+  pauses the ASCII render loop and paints the CSS sky/clouds/grass instead.
+  The omnibox and shortcut chips become white translucent pills.
+* `dark` sets the same attribute, resumes the render loop and returns the page to
+  the current ASCII scene.
+* Any other value is ignored. The function never navigates and never posts a
+  message to the shell.
+
+Before the first call there is no `data-theme` attribute, so the current ASCII
+scene is what loads.
+
 ## Run it alone
 
 ```powershell
@@ -88,9 +105,11 @@ normal default.
   `ICoreWebView2_3::SetVirtualHostNameToFolderMapping`;
 * opens `https://newtab.zephium/index.html` for a new tab (and at startup when no
   URL is given);
-* draws the title bar, tab strip, toolbar and URL field in the same dark ink for
-  every tab, with a mint accent under the active tab (owner-drawn buttons,
-  `WM_CTLCOLOR*` and DWM dark caption);
+* draws the title bar, tab strip, toolbar and URL field from the active
+  `ChromePalette` for every tab (dark by default, optional Frutiger Aero), with
+  owner-drawn buttons, `WM_CTLCOLOR*` and a matching DWM caption;
+* pushes `zephiumSetTheme("aero"|"dark")` into every open start-page view after a
+  theme click and after that view finishes navigating to `newtab.zephium`;
 * hides the Win32 URL row on the start page, so the page is full-bleed;
 * receives `navigate|<input>` messages from the page and resolves them through
   the C17 `navigation` core (`zephium_browser_navigate`), then navigates the
